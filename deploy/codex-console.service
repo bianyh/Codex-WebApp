@@ -1,0 +1,33 @@
+[Unit]
+Description=Codex WebApp local mobile control plane
+Documentation=https://github.com/bianyh/Codex-WebApp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The values below are safe defaults. Override them in
+# ~/.config/codex-console/environment for a different checkout or toolchain.
+Environment=NODE_ENV=production
+Environment=CODEX_NODE=node
+Environment=CODEX_CONSOLE_REPO=%h/Codex-WebApp
+Environment=CODEX_CONSOLE_HOST=127.0.0.1
+Environment=CODEX_CONSOLE_PORT=8787
+Environment=CODEX_CONSOLE_DATA_DIR=%h/.local/state/codex-console
+Environment=CODEX_WORKSPACE_ROOT=%h
+Environment=CODEX_CWD=%h/Codex-WebApp
+Environment=CODEX_COMMAND=codex
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/codex-console/environment
+ExecStart=/bin/sh -c 'cd "$CODEX_CONSOLE_REPO" && exec "$CODEX_NODE" apps/daemon/dist/index.js'
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=mixed
+NoNewPrivileges=true
+# Do not enable PrivateTmp or ProtectSystem: external Codex Turn discovery
+# reads rollout links through /proc/<pid>/fd for the same user.
+UMask=0077
+
+[Install]
+WantedBy=default.target

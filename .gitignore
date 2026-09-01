@@ -1,0 +1,13 @@
+node_modules
+dist
+apps/daemon/data
+generated/codex
+.env
+.DS_Store
+*.log
+coverage
+playwright-report
+test-results
+.vscode
+.idea
+uploads

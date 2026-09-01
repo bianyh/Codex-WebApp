@@ -1,0 +1,5 @@
+{
+  "name": "@codex-console/protocol",
+  "private": true,
+  "type": "module"
+}

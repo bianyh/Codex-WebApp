@@ -1,0 +1,5 @@
+{
+  "name": "@codex-console/domain",
+  "private": true,
+  "type": "module"
+}

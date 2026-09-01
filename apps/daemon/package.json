@@ -1,0 +1,5 @@
+{
+  "name": "@codex-console/daemon",
+  "private": true,
+  "type": "module"
+}

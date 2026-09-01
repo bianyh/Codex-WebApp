@@ -1,0 +1,5 @@
+{
+  "name": "@codex-console/web",
+  "private": true,
+  "type": "module"
+}
