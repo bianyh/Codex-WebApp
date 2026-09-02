@@ -905,6 +905,17 @@ function App() {
       return { ...current, items, thread };
     });
   }, []);
+  const beginEditLastMessage = useCallback((item: Item) => {
+    if (isTurnActiveStatus(snapshot?.thread.status)) {
+      setError("请先中止当前运行，再编辑最近消息");
+      return;
+    }
+    const text = item.text ?? "";
+    clearAttachments();
+    setEditingLastMessage({ itemId: item.id, originalText: text });
+    setInput(text);
+    requestAnimationFrame(() => { composerRef.current?.focus(); composerRef.current?.setSelectionRange(text.length, text.length); });
+  }, [snapshot?.thread.status, clearAttachments]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1554,17 +1565,6 @@ function App() {
     setAutoFollow(false);
     setVisibleStart(Math.max(0, timelineStart - TIMELINE_CHUNK_SIZE));
   };
-  const beginEditLastMessage = useCallback((item: Item) => {
-    if (isTurnActiveStatus(snapshot?.thread.status)) {
-      setError("请先中止当前运行，再编辑最近消息");
-      return;
-    }
-    const text = item.text ?? "";
-    clearAttachments();
-    setEditingLastMessage({ itemId: item.id, originalText: text });
-    setInput(text);
-    requestAnimationFrame(() => { composerRef.current?.focus(); composerRef.current?.setSelectionRange(text.length, text.length); });
-  }, [snapshot?.thread.status, clearAttachments]);
   return (
     <div className="app-shell">
       <ThreadDrawer
