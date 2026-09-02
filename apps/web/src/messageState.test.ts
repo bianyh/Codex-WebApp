@@ -24,7 +24,10 @@ describe("optimistic user messages", () => {
   it("reconciles attachment-only messages without text", () => {
     const local = createOptimisticUserItem("", ["image.png"]);
     const canonical = { id: "server-user-attachment", kind: "user" as const };
-    expect(mergeTimelineItem([local], canonical)).toEqual([canonical]);
+    expect(mergeTimelineItem([local], canonical)).toEqual([{
+      ...canonical,
+      text: "附件：image.png",
+    }]);
   });
 
   it("does not duplicate repeated messages", () => {
