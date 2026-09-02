@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -21,6 +21,8 @@ import {
   LoaderCircle,
   Music,
   RefreshCw,
+  Copy,
+  Upload,
   X,
 } from "lucide-react";
 
@@ -94,6 +96,23 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   return value.data as T;
 }
 
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("当前浏览器不支持复制到剪贴板");
+}
+
 function FileIcon({ entry, size = 15 }: { entry: FsEntry; size?: number }) {
   if (entry.type === "directory") return <Folder size={size} />;
   if (entry.kind === "image") return <FileImage size={size} />;
@@ -150,6 +169,9 @@ export function WorkspaceFiles({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showHidden, setShowHidden] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const load = async (target?: string) => {
     setLoading(true);
     setError("");
@@ -168,15 +190,57 @@ export function WorkspaceFiles({
   useEffect(() => {
     void load(rootPath);
   }, [rootPath]);
+  const uploadFiles = async (fileList: FileList | null) => {
+    if (!fileList?.length || !listing || uploading) return;
+    const files = Array.from(fileList);
+    const invalid = files.find((file) => file.size === 0 || file.size > 25 * 1024 * 1024);
+    if (invalid) {
+      setError(`${invalid.name} 为空或超过 25 MiB`);
+      return;
+    }
+    setUploading(true);
+    setError("");
+    try {
+      for (const file of files) {
+        const response = await fetch(
+          `/api/fs/upload?path=${encodeURIComponent(listing.path)}&name=${encodeURIComponent(file.name)}&mime=${encodeURIComponent(file.type || "application/octet-stream")}`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: { "content-type": "application/octet-stream" },
+            body: file,
+          },
+        );
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body?.error?.message ?? `无法上传 ${file.name}`);
+      }
+      await load(listing.path);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法上传文件");
+    } finally {
+      setUploading(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
+  const copyAbsolutePath = async (entry: FsEntry) => {
+    try {
+      await copyText(entry.path);
+      setCopiedPath(entry.path);
+      window.setTimeout(() => setCopiedPath((current) => current === entry.path ? null : current), 1600);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法复制文件路径");
+    }
+  };
   const entries = useMemo(
     () =>
       (listing?.entries ?? []).filter((entry) => showHidden || !entry.hidden),
     [listing, showHidden],
   );
+  const changedFilePath = (filePath: string) => filePath.startsWith("/")
+    ? filePath
+    : `${rootPath?.replace(/\/$/, "") ?? ""}/${filePath}`;
   const openChanged = (file: { path: string; status?: string }) => {
-    const fullPath = file.path.startsWith("/")
-      ? file.path
-      : `${rootPath?.replace(/\/$/, "") ?? ""}/${file.path}`;
+    const fullPath = changedFilePath(file.path);
     const name = fullPath.split("/").pop() ?? fullPath;
     onOpenFile({
       name,
@@ -213,16 +277,42 @@ export function WorkspaceFiles({
         >
           <RefreshCw className={loading ? "spin" : ""} size={14} />
         </button>
+        <input
+          ref={uploadInputRef}
+          className="file-upload-input"
+          type="file"
+          multiple
+          onChange={(event) => void uploadFiles(event.target.files)}
+        />
+        <button
+          className="mini-tool"
+          disabled={!listing || loading || uploading}
+          onClick={() => uploadInputRef.current?.click()}
+          title="上传文件到当前目录"
+          aria-label="上传文件到当前目录"
+        >
+          {uploading ? <LoaderCircle className="spin" size={14} /> : <Upload size={14} />}
+        </button>
       </div>
       {changedFiles?.length ? (
         <div className="changed-files-strip">
           <div className="files-subtitle">本次修改</div>
           {changedFiles.map((file) => (
-            <button key={file.path} onClick={() => openChanged(file)}>
-              <FileCode2 size={13} />
-              <span>{file.path}</span>
-              <small>{file.status ?? "M"}</small>
-            </button>
+            <div className="changed-file-row" key={file.path}>
+              <button onClick={() => openChanged(file)} title={changedFilePath(file.path)}>
+                <FileCode2 size={13} />
+                <span>{file.path}</span>
+                <small>{file.status ?? "M"}</small>
+              </button>
+              <button
+                className="file-copy-button"
+                onClick={() => void copyAbsolutePath(fileEntryFromPath(changedFilePath(file.path)))}
+                title={`复制服务器绝对路径：${changedFilePath(file.path)}`}
+                aria-label={`复制 ${file.path} 的服务器绝对路径`}
+              >
+                {copiedPath === changedFilePath(file.path) ? <Check size={13} /> : <Copy size={13} />}
+              </button>
+            </div>
           ))}
         </div>
       ) : null}
@@ -246,26 +336,38 @@ export function WorkspaceFiles({
           </div>
         ) : (
           entries.map((entry) => (
-            <button
-              key={entry.path}
-              className="file-entry"
-              onClick={() =>
-                entry.type === "directory"
-                  ? void load(entry.path)
-                  : onOpenFile(entry)
-              }
-            >
-              <FileIcon entry={entry} />
-              <span>
-                <strong>{entry.name}</strong>
-                <small>
-                  {entry.type === "directory"
-                    ? "文件夹"
-                    : humanSize(entry.size)}
-                </small>
-              </span>
-              {entry.type === "directory" && <ChevronRight size={13} />}
-            </button>
+            <div key={entry.path} className="file-entry">
+              <button
+                className="file-entry-main"
+                onClick={() =>
+                  entry.type === "directory"
+                    ? void load(entry.path)
+                    : onOpenFile(entry)
+                }
+                title={entry.path}
+              >
+                <FileIcon entry={entry} />
+                <span>
+                  <strong>{entry.name}</strong>
+                  <small>
+                    {entry.type === "directory"
+                      ? "文件夹"
+                      : humanSize(entry.size)}
+                  </small>
+                </span>
+                {entry.type === "directory" && <ChevronRight size={13} />}
+              </button>
+              {entry.type === "file" && (
+                <button
+                  className="file-copy-button"
+                  onClick={() => void copyAbsolutePath(entry)}
+                  title={`复制服务器绝对路径：${entry.path}`}
+                  aria-label={`复制 ${entry.name} 的服务器绝对路径`}
+                >
+                  {copiedPath === entry.path ? <Check size={13} /> : <Copy size={13} />}
+                </button>
+              )}
+            </div>
           ))
         )}
         {!loading && !error && entries.length === 0 && (

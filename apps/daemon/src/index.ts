@@ -472,6 +472,54 @@ async function buildServer(): Promise<void> {
     }));
   });
 
+  daemon.post<{
+    Querystring: { path?: string; name?: string; mime?: string };
+    Body: Buffer;
+  }>("/api/fs/upload", { bodyLimit: maxUploadBytes }, async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const body = request.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      return reply.code(400).send(failure(request, "empty_upload", "上传文件不能为空"));
+    }
+    if (body.length > maxUploadBytes) {
+      return reply.code(413).send(failure(request, "upload_too_large", "单个文件不能超过 25 MiB"));
+    }
+    const rawName = request.query.name?.trim() ?? "";
+    const name = path.basename(rawName).slice(0, 180);
+    if (
+      !rawName ||
+      rawName !== name ||
+      name === "." ||
+      name === ".." ||
+      /[\\/\u0000-\u001f\u007f]/.test(name)
+    ) {
+      return reply.code(400).send(failure(request, "invalid_upload_name", "文件名不能包含路径分隔符或控制字符"));
+    }
+    try {
+      const directory = await isLocalPath(request.query.path || config.workspaceRoot);
+      const directoryStat = await stat(directory);
+      if (!directoryStat.isDirectory()) {
+        return reply.code(400).send(failure(request, "not_directory", "上传目标不是文件夹"));
+      }
+      const storedPath = path.join(directory, name);
+      await writeFile(storedPath, body, { mode: 0o600, flag: "wx" });
+      const metadata = await stat(storedPath);
+      return reply.code(201).send(ok(request, {
+        name,
+        path: storedPath,
+        type: "file",
+        kind: fileKind(storedPath),
+        size: metadata.size,
+        modifiedAt: metadata.mtime.toISOString(),
+        hidden: name.startsWith("."),
+      }));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") return reply.code(409).send(failure(request, "file_exists", "同名文件已经存在"));
+      return reply.code(400).send(failure(request, "upload_failed", error instanceof Error ? error.message : "无法上传文件"));
+    }
+  });
+
   daemon.get("/api/projects", async (request, reply) => { if (!(await requireAuth(request, reply))) return; return ok(request, getState().projects); });
   daemon.post<{ Body: { name?: string; path?: string } }>("/api/projects", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;

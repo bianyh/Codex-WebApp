@@ -224,3 +224,15 @@ html[data-theme="light"] .login-orbit, html[data-theme="light"] .login-orbit::be
   .composer-model-select { max-width: 148px; }
   .composer-model-select select { max-width: 124px; }
 }
+
+/* Workspace file actions: keep opening and copying as separate hit targets. */
+.file-upload-input { display: none; }
+.file-entry { align-items: stretch; gap: 2px; padding: 0 2px 0 0; }
+.file-entry-main { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: inherit; padding: 6px; text-align: left; }
+.file-entry-main > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.file-copy-button { width: 30px; min-width: 30px; align-self: center; height: 30px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: #6f7b8b; }
+.file-copy-button:hover { background: #2a3039; color: #e6ebf2; }
+html[data-theme="light"] .file-copy-button:hover { background: #dfe5eb; color: #20242b; }
+.changed-file-row { display: flex; align-items: center; gap: 2px; margin: 0 7px 3px; }
+.changed-file-row > button:first-child { min-width: 0; flex: 1; width: auto; margin: 0; }
+.changed-file-row > .file-copy-button { flex: 0 0 30px; width: 30px; margin: 0; padding: 0; }

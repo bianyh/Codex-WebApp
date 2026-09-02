@@ -83,7 +83,7 @@ CODEX_CONSOLE_PORT=8787 \
 npm run start
 ```
 
-The workspace browser stays inside `CODEX_WORKSPACE_ROOT`. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
+The workspace browser stays inside `CODEX_WORKSPACE_ROOT`. The Files panel can upload files directly to the current directory and copy each file's server-side absolute path. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
 
 ## Background Service on Linux
 

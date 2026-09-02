@@ -37,7 +37,7 @@ official codex app-server -> local projects and tools
 - Separate user, execution-progress, and final-answer messages, with collapsible execution details.
 - Markdown/GFM and LaTeX/KaTeX rendering.
 - Model selection, image/file/audio attachments, and desktop clipboard paste for images and files.
-- Authenticated workspace browsing, line-numbered text preview, media/PDF preview, and file links.
+- Authenticated workspace browsing, upload to the current directory, line-numbered text preview, media/PDF preview, file links, and copy-absolute-path actions.
 - Light/dark themes and installable PWA support.
 
 ## Configure With Codex
