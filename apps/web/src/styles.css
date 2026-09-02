@@ -94,6 +94,21 @@ code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospac
 .message-edit-button:disabled { color: #4f5865; cursor: not-allowed; opacity: .7; }
 .message-edit-button:disabled:hover { background: transparent; color: #4f5865; }
 .user-message { scroll-margin-top: 18px; }
+.message, .timeline-card { content-visibility: auto; contain-intrinsic-size: 80px; }
+.load-earlier-button { width: min(420px, 100%); min-height: 34px; margin: 0 auto 18px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid #303945; border-radius: 5px; background: #171b21; color: #8fa0b6; font-size: 11px; }
+.load-earlier-button:hover:not(:disabled) { background: #222a35; color: #e5ebf4; }
+.load-earlier-button small { color: #667385; margin-left: 3px; }
+.timeline-error-card { display: flex; gap: 10px; margin: 0 0 18px; padding: 12px 14px; border: 1px solid #6b3b3f; border-radius: 6px; background: #29191c; color: #f0b4b4; }
+.timeline-error-icon { flex: 0 0 23px; display: flex; align-items: flex-start; justify-content: center; color: #f28d8d; padding-top: 2px; }
+.timeline-error-copy { min-width: 0; flex: 1; }
+.timeline-error-title { margin-bottom: 5px; color: #f4c4c4; font-size: 12px; font-weight: 650; }
+.timeline-error-card .prose { color: #e6b5b5; font-size: 12px; line-height: 1.55; }
+.timeline-error-card .prose p { margin: 0; }
+html[data-theme="light"] .load-earlier-button { border-color: #cbd3dc; background: #f4f6f8; color: #52667d; }
+html[data-theme="light"] .load-earlier-button:hover:not(:disabled) { background: #e8edf2; color: #202832; }
+html[data-theme="light"] .timeline-error-card { border-color: #e2b7b9; background: #fff2f2; color: #8c3438; }
+html[data-theme="light"] .timeline-error-icon, html[data-theme="light"] .timeline-error-title { color: #a43d42; }
+html[data-theme="light"] .timeline-error-card .prose { color: #7b3c40; }
 .message-nav-controls { position: absolute; z-index: 5; right: 24px; bottom: 154px; width: 34px; display: grid; grid-template-rows: 34px 22px 34px; align-items: center; border: 1px solid #363c46; border-radius: 7px; overflow: hidden; background: #20242b; box-shadow: 0 8px 24px #0007; }
 .message-nav-controls button { width: 34px; height: 34px; display: grid; place-items: center; border: 0; background: transparent; color: #c7cfda; }
 .message-nav-controls button:hover:not(:disabled) { background: #343b46; color: #fff; }

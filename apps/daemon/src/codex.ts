@@ -44,6 +44,20 @@ function textFromContent(content: unknown): string {
   }).join("");
 }
 
+function errorTextFromRaw(value: unknown): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object") {
+    const error = value as Record<string, unknown>;
+    const message = typeof error.message === "string" ? error.message.trim() : "";
+    const details = typeof error.additionalDetails === "string" ? error.additionalDetails.trim() : "";
+    if (message && details && !message.includes(details)) return `${message}\n${details}`;
+    if (message) return message;
+    if (details) return details;
+    if (typeof error.codexErrorInfo === "string") return error.codexErrorInfo;
+  }
+  return "Codex 执行失败，未返回详细错误信息";
+}
+
 function statusFromRaw(value: unknown): ThreadStatus {
   if (typeof value === "string") {
     if (["idle", "running", "waiting_approval", "waiting_input", "completed", "failed", "interrupted"].includes(value)) return value as ThreadStatus;
@@ -268,13 +282,22 @@ export class CodexProcess {
     const turns = Array.isArray(raw.turns) ? raw.turns : [];
     const items = turns.flatMap((turn) => {
       const t = (turn && typeof turn === "object" ? turn : {}) as Record<string, unknown>;
-      if (!Array.isArray(t.items)) return [];
-      const mapped = t.items.map(itemFromRaw);
+      const mapped = Array.isArray(t.items) ? t.items.map(itemFromRaw) : [];
       // Some older providers omit MessagePhase. The last assistant message
       // in a completed turn is still the user-visible final reply; mark it so
       // the UI can separate it from progress narration.
       const lastAgent = [...mapped].reverse().find((item) => item.kind === "agent");
       if (lastAgent && !lastAgent.status) lastAgent.status = "final_answer";
+      const status = typeof t.status === "string" ? t.status : "";
+      if ((status === "failed" || status === "systemError" || t.error) && t.error) {
+        mapped.push({
+          id: `codex-error-${String(t.id ?? randomUUID())}`,
+          kind: "system",
+          title: "Codex 错误",
+          text: errorTextFromRaw(t.error),
+          status: "failed",
+        });
+      }
       return mapped;
     });
     return { thread: summaryFromRaw(raw), items, pendingRequests: [], changedFiles: [], plan: [], diff: "" };
@@ -365,4 +388,4 @@ export class CodexProcess {
   private rejectAll(error: Error): void { for (const waiter of this.waiters.values()) { clearTimeout(waiter.timer); waiter.reject(error); } this.waiters.clear(); }
 }
 
-export { itemFromRaw, summaryFromRaw, userInputFromTurn };
+export { errorTextFromRaw, itemFromRaw, summaryFromRaw, userInputFromTurn };

@@ -12,7 +12,7 @@ import { z } from "zod";
 import { allowedOrigin, config } from "./config.js";
 import { loadState, getState, persistState } from "./state.js";
 import { authenticated, login, logout, requireAuth, setPassword } from "./auth.js";
-import { CodexProcess, itemFromRaw } from "./codex.js";
+import { CodexProcess, errorTextFromRaw, itemFromRaw } from "./codex.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import { ThreadActivityTracker, type ThreadActivity } from "./threadActivity.js";
 import type { ConsoleEvent, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
@@ -254,7 +254,17 @@ function updateSnapshot(event: ConsoleEvent): void {
   if (!snapshot) return;
   const params = event.event;
   const method = event.sourceMethod;
-  if (method === "item/agentMessage/delta") {
+  if (method === "error" || method === "thread/realtime/error") {
+    const message = errorTextFromRaw(params.error ?? params.message ?? params.additionalDetails);
+    if (!snapshot.items.some((item) => item.kind === "system" && item.text === message)) {
+      snapshot.items.push({ id: `codex-error-${String(params.turnId ?? randomUUID())}`, kind: "system", title: "Codex 错误", text: message, status: "failed" });
+    }
+    if (params.willRetry !== true) {
+      snapshot.thread.status = "failed";
+      snapshot.thread.activeTurnId = undefined;
+      snapshot.thread.canInterrupt = false;
+    }
+  } else if (method === "item/agentMessage/delta") {
     const itemId = String(params.itemId ?? params.id ?? "streaming-agent");
     let item = snapshot.items.find((candidate) => candidate.id === itemId);
     if (!item) { item = { id: itemId, kind: "agent", text: "" }; snapshot.items.push(item); }
@@ -298,6 +308,12 @@ function updateSnapshot(event: ConsoleEvent): void {
   } else if (method === "turn/completed") {
     const turn = params.turn && typeof params.turn === "object" ? params.turn as Record<string, unknown> : undefined;
     const terminalStatus = typeof turn?.status === "string" ? turn.status : typeof params.status === "string" ? params.status : "completed";
+    if ((terminalStatus === "failed" || terminalStatus === "systemError") && turn?.error) {
+      const message = errorTextFromRaw(turn.error);
+      if (!snapshot.items.some((item) => item.kind === "system" && item.text === message)) {
+        snapshot.items.push({ id: `codex-error-${String(turn.id ?? randomUUID())}`, kind: "system", title: "Codex 错误", text: message, status: "failed" });
+      }
+    }
     snapshot.thread.status = terminalStatus === "interrupted" ? "interrupted" : terminalStatus === "failed" || terminalStatus === "systemError" ? "failed" : "completed";
     snapshot.thread.activeTurnId = undefined;
     snapshot.thread.canInterrupt = false;
@@ -629,8 +645,9 @@ async function buildServer(): Promise<void> {
       sockets.add(socket);
       socket.send(JSON.stringify({ type: "server_ready", codexVersion: codex.version, capabilities: codex.capabilities }));
       socket.on("message", async (raw) => {
+        let action: Record<string, unknown> = {};
         try {
-          const action = JSON.parse(String(raw)) as Record<string, unknown>;
+          action = JSON.parse(String(raw)) as Record<string, unknown>;
           if (action.type === "subscribe_thread" && typeof action.threadId === "string") {
             subscriptions.set(socket, action.threadId);
             let snapshot = snapshots.get(action.threadId);
@@ -744,7 +761,14 @@ async function buildServer(): Promise<void> {
           }
           if (action.type === "respond_request" && (typeof action.requestId === "string" || typeof action.requestId === "number")) { await codex.respond(action.requestId, action.response ?? {}); return; }
           socket.send(JSON.stringify({ type: "error", error: { code: "invalid_action", message: "不支持的操作", retryable: false } }));
-        } catch (error) { socket.send(JSON.stringify({ type: "error", error: { code: "action_failed", message: error instanceof Error ? error.message : "操作失败", retryable: true } })); }
+          } catch (error) {
+            socket.send(JSON.stringify({
+              type: "error",
+              threadId: typeof action.threadId === "string" ? action.threadId : undefined,
+              turnId: typeof action.turnId === "string" ? action.turnId : undefined,
+              error: { code: "action_failed", message: error instanceof Error ? error.message : "操作失败", retryable: true },
+            }));
+          }
       });
       socket.on("close", () => { sockets.delete(socket); subscriptions.delete(socket); });
     })();

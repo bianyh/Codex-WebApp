@@ -1,6 +1,9 @@
 import React, {
+  memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -113,7 +116,7 @@ function filesFromClipboard(data: DataTransfer): File[] {
   return files;
 }
 
-function MessageMarkdown({ text, cwd, onOpenFile }: { text: string; cwd?: string; onOpenFile?: (entry: FsEntry) => void }) {
+const MessageMarkdown = memo(function MessageMarkdown({ text, cwd, onOpenFile }: { text: string; cwd?: string; onOpenFile?: (entry: FsEntry) => void }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
@@ -144,11 +147,32 @@ function MessageMarkdown({ text, cwd, onOpenFile }: { text: string; cwd?: string
       {normalizeMarkdownMath(text)}
     </ReactMarkdown>
   );
-}
+});
 
 type TimelineSegment =
-  | { kind: "user" | "final"; items: Item[] }
+  | { kind: "user" | "final" | "system"; items: Item[] }
   | { kind: "process"; items: Item[] };
+
+const INITIAL_TIMELINE_ITEMS = 240;
+const TIMELINE_CHUNK_SIZE = 240;
+const TIMELINE_MAX_ITEMS = 360;
+
+function codexErrorText(params: Record<string, unknown>): string {
+  const value = params.error;
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object") {
+    const error = value as Record<string, unknown>;
+    const message = typeof error.message === "string" ? error.message.trim() : "";
+    const details = typeof error.additionalDetails === "string" ? error.additionalDetails.trim() : "";
+    if (message && details && !message.includes(details)) return `${message}\n${details}`;
+    if (message) return message;
+    if (details) return details;
+    if (typeof error.codexErrorInfo === "string") return error.codexErrorInfo;
+  }
+  if (typeof params.message === "string" && params.message.trim()) return params.message.trim();
+  if (typeof params.additionalDetails === "string" && params.additionalDetails.trim()) return params.additionalDetails.trim();
+  return "Codex 执行失败，未返回详细错误信息";
+}
 
 function isFinalAgentMessage(item: Item): boolean {
   return item.kind === "agent" && (item.status === "final_answer" || item.status === "final");
@@ -159,6 +183,8 @@ function segmentTimeline(items: Item[]): TimelineSegment[] {
   for (const item of items) {
     const kind: TimelineSegment["kind"] = item.kind === "user"
       ? "user"
+      : item.kind === "system"
+        ? "system"
       : isFinalAgentMessage(item)
         ? "final"
         : "process";
@@ -351,7 +377,7 @@ function ThreadDrawer({
   );
 }
 
-function TimelineItem({ item, cwd, isLastUser = false, editable = false, editUnavailableReason, onEdit, onOpenFile }: { item: Item; cwd?: string; isLastUser?: boolean; editable?: boolean; editUnavailableReason?: string; onEdit?: (item: Item) => void; onOpenFile?: (entry: FsEntry) => void }) {
+const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false, editable = false, editUnavailableReason, onEdit, onOpenFile }: { item: Item; cwd?: string; isLastUser?: boolean; editable?: boolean; editUnavailableReason?: string; onEdit?: (item: Item) => void; onOpenFile?: (entry: FsEntry) => void }) {
   if (item.kind === "user")
     return (
       <article className="message user-message" data-user-message="true" data-item-id={item.id}>
@@ -385,6 +411,16 @@ function TimelineItem({ item, cwd, isLastUser = false, editable = false, editUna
           <div className="prose">
             <MessageMarkdown text={item.text ?? ""} cwd={cwd} onOpenFile={onOpenFile} />
           </div>
+        </div>
+      </article>
+    );
+  if (item.kind === "system")
+    return (
+      <article className="timeline-error-card">
+        <div className="timeline-error-icon"><CircleAlert size={16} /></div>
+        <div className="timeline-error-copy">
+          <div className="timeline-error-title">{item.title ?? "Codex 错误"}</div>
+          <div className="prose"><MessageMarkdown text={item.text ?? ""} cwd={cwd} onOpenFile={onOpenFile} /></div>
         </div>
       </article>
     );
@@ -458,9 +494,9 @@ function TimelineItem({ item, cwd, isLastUser = false, editable = false, editUna
       <div className="card-content"><MessageMarkdown text={item.text ?? ""} cwd={cwd} onOpenFile={onOpenFile} /></div>
     </details>
   );
-}
+});
 
-function ProcessGroup({
+const ProcessGroup = memo(function ProcessGroup({
   items,
   cwd,
   open,
@@ -495,7 +531,7 @@ function ProcessGroup({
       )}
     </section>
   );
-}
+});
 
 function TimelineSegments({
   items,
@@ -520,9 +556,10 @@ function TimelineSegments({
   onEdit: (item: Item) => void;
   onOpenFile?: (entry: FsEntry) => void;
 }) {
+  const segments = useMemo(() => segmentTimeline(items), [items]);
   return (
     <>
-      {segmentTimeline(items).map((segment, index) => {
+      {segments.map((segment, index) => {
         if (segment.kind === "process") {
           return <ProcessGroup key={`process-${index}`} items={segment.items} cwd={cwd} open={processExpanded} onToggle={onToggleProcess} onOpenFile={onOpenFile} />;
         }
@@ -842,12 +879,30 @@ function App() {
   const [autoFollow, setAutoFollow] = useState(true);
   const [messageNavigation, setMessageNavigation] = useState({ index: 0, count: 0 });
   const [processExpanded, setProcessExpanded] = useState(true);
+  const [visibleStart, setVisibleStart] = useState(0);
   const selectedModel = selected ? threadModels[selected] ?? defaultModel : defaultModel;
   const turnIsActive = isTurnActiveStatus(snapshot?.thread.status);
+  const trimTimelineRef = useRef(true);
+  const pendingInitialScrollRef = useRef<string | null>(null);
+  const pendingPrependHeightRef = useRef<number | null>(null);
   const clearAttachments = useCallback(() => {
     setAttachments((items) => {
       for (const item of items) if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       return [];
+    });
+  }, []);
+  const appendTimelineError = useCallback((message: string, turnId?: string, markFailed = true) => {
+    setError(message);
+    setSnapshot((current) => {
+      if (!current) return current;
+      const existing = current.items.some((item) => item.kind === "system" && item.text === message);
+      const items = existing
+        ? current.items
+        : [...current.items, { id: `codex-error-${turnId ?? crypto.randomUUID()}`, kind: "system" as const, title: "Codex 错误", text: message, status: "failed" }];
+      const thread = markFailed
+        ? { ...current.thread, status: "failed" as const, activeTurnId: undefined, canInterrupt: false, activitySource: undefined }
+        : current.thread;
+      return { ...current, items, thread };
     });
   }, []);
 
@@ -865,8 +920,16 @@ function App() {
     attachmentsRef.current = attachments;
   }, [attachments]);
   useEffect(() => {
-    setProcessExpanded(turnIsActive);
-  }, [selected, turnIsActive]);
+    setProcessExpanded(turnIsActive && (snapshot?.items.length ?? 0) <= TIMELINE_MAX_ITEMS);
+  }, [selected, turnIsActive, snapshot?.items.length]);
+  useEffect(() => {
+    if (!selected) return;
+    trimTimelineRef.current = true;
+    pendingInitialScrollRef.current = selected;
+    pendingPrependHeightRef.current = null;
+    setVisibleStart(0);
+    setAutoFollow(true);
+  }, [selected]);
   useEffect(() => () => {
     for (const attachment of attachmentsRef.current) {
       if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
@@ -1002,12 +1065,16 @@ function App() {
             typeof event.threadId === "string" ? event.threadId : undefined;
           const inner = event.event as TimelineEvent;
           if (threadId && threadId === selected) applyEvent(inner);
-        } else if (event.type === "error")
-          setError(
-            String(
-              (event.error as Record<string, unknown>)?.message ?? "操作失败",
-            ),
+        } else if (event.type === "error") {
+          const message = String(
+            (event.error as Record<string, unknown>)?.message ?? "操作失败",
           );
+          if (!event.threadId || event.threadId === selected) {
+            appendTimelineError(message, typeof event.turnId === "string" ? event.turnId : undefined);
+          } else {
+            setError(message);
+          }
+        }
       };
     };
     connect();
@@ -1015,7 +1082,7 @@ function App() {
       closed = true;
       wsRef.current?.close();
     };
-  }, [authenticated, selected, subscribe]);
+  }, [authenticated, selected, subscribe, appendTimelineError]);
   const applyEvent = (event: TimelineEvent) => {
     const params = event.params ?? {};
     const turnObject =
@@ -1027,6 +1094,13 @@ function App() {
       : typeof turnObject?.id === "string"
         ? turnObject.id
         : undefined;
+    if (event.method === "error" || event.method === "thread/realtime/error") {
+      const message = codexErrorText(params);
+      const willRetry = params.willRetry === true;
+      appendTimelineError(message, eventTurnId, !willRetry);
+      setActiveTurnId((current) => willRetry ? current : eventTurnId && current && eventTurnId !== current ? current : null);
+      return;
+    }
     if (event.method === "serverRequest/resolved") {
       const requestId = params.requestId;
       if (typeof requestId === "string" || typeof requestId === "number") {
@@ -1038,6 +1112,12 @@ function App() {
       setActiveTurnId(eventTurnId ?? null);
     if (event.method === "turn/completed" || event.method === "turn/interrupted" || event.method === "turn/interrupt")
       setActiveTurnId((current) => eventTurnId && current && eventTurnId !== current ? current : null);
+    if (event.method === "turn/completed") {
+      const terminalStatus = typeof turnObject?.status === "string" ? turnObject.status : "completed";
+      if (terminalStatus === "failed" || terminalStatus === "systemError") {
+        appendTimelineError(codexErrorText({ error: turnObject?.error }), eventTurnId);
+      }
+    }
     setSnapshot((current) => {
       if (!current) return current;
       const currentTurnId = current.thread.activeTurnId ?? activeTurnId ?? undefined;
@@ -1218,13 +1298,6 @@ function App() {
       }
       return { ...current, thread, items, changedFiles, diff, plan, tokenUsage };
     });
-    if (autoFollow)
-      requestAnimationFrame(() =>
-        timelineRef.current?.scrollTo({
-          top: timelineRef.current.scrollHeight,
-          behavior: "smooth",
-        }),
-      );
   };
   useEffect(() => {
     if (!selected || !authenticated) return;
@@ -1254,6 +1327,28 @@ function App() {
     window.addEventListener("resize", updateMessageNavigation);
     return () => window.removeEventListener("resize", updateMessageNavigation);
   }, [updateMessageNavigation]);
+  useLayoutEffect(() => {
+    const container = timelineRef.current;
+    if (!container) return;
+    const threadId = snapshot?.thread.id;
+    if (threadId && threadId === selected && pendingInitialScrollRef.current === threadId) {
+      const start = Math.max(0, (snapshot?.items.length ?? 0) - INITIAL_TIMELINE_ITEMS);
+      if (visibleStart !== start) {
+        setVisibleStart(start);
+        return;
+      }
+      pendingInitialScrollRef.current = null;
+      container.scrollTop = container.scrollHeight;
+      setAutoFollow(true);
+      updateMessageNavigation();
+    }
+    const previousHeight = pendingPrependHeightRef.current;
+    if (previousHeight !== null) {
+      pendingPrependHeightRef.current = null;
+      container.scrollTop += container.scrollHeight - previousHeight;
+      updateMessageNavigation();
+    }
+  }, [selected, snapshot?.thread.id, snapshot?.items.length, visibleStart, updateMessageNavigation]);
   const removeAttachment = (id: string) => {
     setAttachments((items) => {
       const removed = items.find((item) => item.id === id);
@@ -1445,7 +1540,21 @@ function App() {
     models.find((entry) => entry.model === selectedModel)?.displayName ??
     (selectedModel || currentThread?.model || "Codex");
   const lastUserItem = snapshot ? [...snapshot.items].reverse().find((item) => item.kind === "user") : undefined;
-  const beginEditLastMessage = (item: Item) => {
+  const timelineStart = snapshot
+    ? trimTimelineRef.current
+      ? Math.max(visibleStart, snapshot.items.length - TIMELINE_MAX_ITEMS)
+      : Math.min(visibleStart, snapshot.items.length)
+    : 0;
+  const visibleTimelineItems = snapshot?.items.slice(timelineStart) ?? [];
+  const loadEarlierMessages = () => {
+    if (!snapshot || timelineStart <= 0 || pendingPrependHeightRef.current !== null) return;
+    const container = timelineRef.current;
+    if (container) pendingPrependHeightRef.current = container.scrollHeight;
+    trimTimelineRef.current = false;
+    setAutoFollow(false);
+    setVisibleStart(Math.max(0, timelineStart - TIMELINE_CHUNK_SIZE));
+  };
+  const beginEditLastMessage = useCallback((item: Item) => {
     if (isTurnActiveStatus(snapshot?.thread.status)) {
       setError("请先中止当前运行，再编辑最近消息");
       return;
@@ -1455,7 +1564,7 @@ function App() {
     setEditingLastMessage({ itemId: item.id, originalText: text });
     setInput(text);
     requestAnimationFrame(() => { composerRef.current?.focus(); composerRef.current?.setSelectionRange(text.length, text.length); });
-  };
+  }, [snapshot?.thread.status, clearAttachments]);
   return (
     <div className="app-shell">
       <ThreadDrawer
@@ -1535,9 +1644,9 @@ function App() {
           tabIndex={0}
           onScroll={(event) => {
             const target = event.currentTarget;
-            setAutoFollow(
-              target.scrollHeight - target.scrollTop - target.clientHeight < 80,
-            );
+            const following = target.scrollHeight - target.scrollTop - target.clientHeight < 80;
+            setAutoFollow(following);
+            if (!following) trimTimelineRef.current = false;
             updateMessageNavigation();
           }}
         >
@@ -1548,18 +1657,31 @@ function App() {
             </div>
           )}
           {snapshot && (
-            <TimelineSegments
-              items={snapshot.items}
-              cwd={snapshot.thread.cwd}
-              isRunning={turnIsActive}
-              processExpanded={processExpanded}
-              onToggleProcess={() => setProcessExpanded((value) => !value)}
-              lastUserItem={lastUserItem}
-              canEditLastMessage={snapshot.thread.canRetry === true}
-              editUnavailableReason="该线程仍被另一个 Codex 窗口占用，请关闭原窗口或从本控制台打开后再编辑"
-              onEdit={beginEditLastMessage}
-              onOpenFile={setPreviewEntry}
-            />
+            <>
+              {timelineStart > 0 && (
+                <button
+                  className="load-earlier-button"
+                  onClick={loadEarlierMessages}
+                  disabled={pendingPrependHeightRef.current !== null}
+                >
+                  <ArrowUp size={14} />
+                  加载更早消息
+                  <small>还剩 {timelineStart} 条</small>
+                </button>
+              )}
+              <TimelineSegments
+                items={visibleTimelineItems}
+                cwd={snapshot.thread.cwd}
+                isRunning={turnIsActive}
+                processExpanded={processExpanded}
+                onToggleProcess={() => setProcessExpanded((value) => !value)}
+                lastUserItem={lastUserItem}
+                canEditLastMessage={snapshot.thread.canRetry === true}
+                editUnavailableReason="该线程仍被另一个 Codex 窗口占用，请关闭原窗口或从本控制台打开后再编辑"
+                onEdit={beginEditLastMessage}
+                onOpenFile={setPreviewEntry}
+              />
+            </>
           )}
           {snapshot?.items.length === 0 && (
             <div className="empty-thread">

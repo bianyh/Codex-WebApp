@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { itemFromRaw, summaryFromRaw, userInputFromTurn } from "./codex.js";
+import { errorTextFromRaw, itemFromRaw, summaryFromRaw, userInputFromTurn } from "./codex.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import {
   parseLatestRolloutActivity,
@@ -39,6 +39,12 @@ describe("Codex protocol mapping", () => {
     expect(itemFromRaw({ type: "userMessage", id: "u1", content: [{ type: "text", text: "hello" }] })).toMatchObject({ id: "u1", kind: "user", text: "hello" });
     expect(itemFromRaw({ type: "commandExecution", id: "c1", command: "ls", aggregatedOutput: "file.txt", status: "completed" })).toMatchObject({ id: "c1", kind: "command", command: "ls", output: "file.txt" });
     expect(itemFromRaw({ type: "futureItem", id: "x1" })).toMatchObject({ id: "x1", kind: "unknown", title: "futureItem" });
+  });
+
+  it("extracts useful details from failed Codex turns", () => {
+    expect(errorTextFromRaw({ message: "context window exceeded", additionalDetails: "Try a shorter prompt" })).toBe("context window exceeded\nTry a shorter prompt");
+    expect(errorTextFromRaw({ codexErrorInfo: "serverOverloaded" })).toBe("serverOverloaded");
+    expect(errorTextFromRaw(undefined)).toBe("Codex 执行失败，未返回详细错误信息");
   });
 
   it("extracts changed files and diffs from completed fileChange items", () => {
