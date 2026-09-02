@@ -6,6 +6,10 @@
 
 > 本项目是非官方项目，与 OpenAI 没有任何隶属、授权或背书关系。
 
+<img width="2552" height="1340" alt="image" src="https://github.com/user-attachments/assets/f2338052-777d-4c06-8cbb-3f2facec86b8" />
+<img width="2547" height="1337" alt="image" src="https://github.com/user-attachments/assets/c883a2ae-3772-4401-97b7-086e381d8b80" />
+
+
 ## 项目用途
 
 Codex WebApp 在本机运行 daemon，由 daemon 通过 stdio 启动并管理官方 `codex app-server`。浏览器通过经过认证的 HTTP 和 WebSocket 连接 daemon，不需要云端中转服务。
