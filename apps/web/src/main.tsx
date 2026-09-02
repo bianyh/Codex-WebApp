@@ -65,6 +65,7 @@ import type {
 import { FilePreview, WorkspaceFiles, fileEntryFromPath, type FsEntry } from "./WorkspaceFiles";
 import { resolveLocalFileHref } from "./fileLinks";
 import { normalizeMarkdownMath } from "./markdown";
+import { createOptimisticUserItem, mergeTimelineItem, textFromRawItem } from "./messageState";
 import { NewThreadDialog } from "./NewThreadDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import "./styles.css";
@@ -1150,7 +1151,7 @@ function App() {
                         ? "user"
                         : "unknown",
           title: rawType === "commandExecution" ? "Command" : rawType === "fileChange" ? `${changes.length || 1} file change${changes.length === 1 ? "" : "s"}` : rawType === "reasoning" ? "Reasoning" : undefined,
-          text: typeof raw.text === "string" ? raw.text : summary || undefined,
+          text: (textFromRawItem(raw) ?? summary) || undefined,
           command: typeof raw.command === "string" ? raw.command : undefined,
           output:
             typeof raw.aggregatedOutput === "string"
@@ -1166,9 +1167,8 @@ function App() {
                 ? "inProgress"
                 : undefined,
         };
-        const index = items.findIndex((item) => item.id === mapped.id);
-        if (index >= 0) items[index] = { ...items[index], ...mapped };
-        else items.push(mapped);
+        const mergedItems = mergeTimelineItem(items, mapped);
+        items.splice(0, items.length, ...mergedItems);
         for (const change of changes) {
           if (typeof change.path !== "string") continue;
           const existing = changedFiles.find((file) => file.path === change.path);
@@ -1321,22 +1321,50 @@ function App() {
     setBusy(true);
     setInput("");
     const outgoingAttachments = attachments.map(({ previewUrl: _previewUrl, ...attachment }) => attachment);
-    wsRef.current.send(
-      JSON.stringify({
-        type: editingLastMessage
-          ? "retry_last_turn"
-          : isTurnActiveStatus(snapshot?.thread.status)
-            ? snapshot.thread.status !== "running" || snapshot.thread.activitySource === "external"
-              ? "queue_turn"
-              : "steer_turn"
-            : "start_turn",
-        threadId: selected,
-        turnId: activeTurnId,
+    const actionType = editingLastMessage
+      ? "retry_last_turn"
+      : isTurnActiveStatus(snapshot?.thread.status)
+        ? snapshot.thread.status !== "running" || snapshot.thread.activitySource === "external"
+          ? "queue_turn"
+          : "steer_turn"
+        : "start_turn";
+    if (actionType === "retry_last_turn" && editingLastMessage) {
+      setSnapshot((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          items: current.items.map((item) =>
+            item.id === editingLastMessage.itemId
+              ? { ...item, text }
+              : item,
+          ),
+        };
+      });
+    } else {
+      const optimisticItem = createOptimisticUserItem(
         text,
-        attachments: outgoingAttachments,
-        model: selectedModel || undefined,
-      }),
-    );
+        outgoingAttachments.map((attachment) => attachment.name),
+      );
+      setSnapshot((current) => current
+        ? { ...current, items: [...current.items, optimisticItem] }
+        : current);
+      if (autoFollow) {
+        requestAnimationFrame(() =>
+          timelineRef.current?.scrollTo({
+            top: timelineRef.current.scrollHeight,
+            behavior: "smooth",
+          }),
+        );
+      }
+    }
+    wsRef.current.send(JSON.stringify({
+      type: actionType,
+      threadId: selected,
+      turnId: activeTurnId,
+      text,
+      attachments: outgoingAttachments,
+      model: selectedModel || undefined,
+    }));
     clearAttachments();
     setEditingLastMessage(null);
     setBusy(false);
