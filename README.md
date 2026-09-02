@@ -6,6 +6,9 @@ An open-source, self-hosted web console for controlling Codex from a phone or de
 
 > This project is unofficial and is not affiliated with or endorsed by OpenAI.
 
+<img width="2552" height="1340" alt="image" src="https://github.com/user-attachments/assets/4257dc7e-883f-4cac-8bb6-dcad3cefdc60" />
+
+
 ## What It Does
 
 Codex WebApp runs a local daemon that starts and supervises the official `codex app-server` over stdio. The browser connects to the daemon through authenticated HTTP and WebSocket endpoints. No cloud relay is required.
