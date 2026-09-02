@@ -16,7 +16,6 @@ import {
   FileText,
   Film,
   Folder,
-  FolderOpen,
   FolderPlus,
   LoaderCircle,
   Music,
@@ -534,6 +533,7 @@ export function FilePreview({
     entry.kind === "text" || entry.kind === "markdown",
   );
   const [error, setError] = useState("");
+  const [copiedPath, setCopiedPath] = useState(false);
   const lineCount = content?.content.split(/\r?\n/).length;
   const rawUrl = `/api/fs/raw?path=${encodeURIComponent(entry.path)}`;
   useEffect(() => {
@@ -558,6 +558,17 @@ export function FilePreview({
             </span>
           </div>
           <div className="preview-actions">
+            <button
+              className="icon-button"
+              onClick={() => void copyText(entry.path).then(() => {
+                setCopiedPath(true);
+                window.setTimeout(() => setCopiedPath(false), 1600);
+              }).catch((reason) => setError(reason instanceof Error ? reason.message : "无法复制文件路径"))}
+              title="复制服务器绝对路径"
+              aria-label="复制服务器绝对路径"
+            >
+              {copiedPath ? <Check size={17} /> : <Copy size={17} />}
+            </button>
             <a
               className="icon-button"
               href={rawUrl}

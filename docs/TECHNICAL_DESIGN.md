@@ -345,6 +345,12 @@ GET  /api/projects
 POST /api/projects
 PATCH /api/projects/:projectId
 
+GET  /api/fs/list?path=
+POST /api/fs/upload?path=&name=&mime=
+POST /api/fs/directories
+GET  /api/fs/content?path=
+GET  /api/fs/raw?path=
+
 GET  /api/threads?projectId=&cursor=
 GET  /api/threads/:threadId
 POST /api/threads
