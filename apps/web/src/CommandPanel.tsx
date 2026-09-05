@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { CircleAlert, LoaderCircle, Play, Square, Terminal, Trash2 } from "lucide-react";
+import { createCommandId } from "./commandId";
 
 type CommandResult = {
   command: string;
@@ -44,10 +45,11 @@ export function CommandPanel({ cwd }: { cwd?: string }) {
   const run = async () => {
     const value = command.trim();
     if (!cwd || !value || runningCommandId) return;
-    const commandId = crypto.randomUUID();
-    setRunningCommandId(commandId);
     setError("");
+    let commandId = "";
     try {
+      commandId = createCommandId();
+      setRunningCommandId(commandId);
       const result = await executeCommand(cwd, value, commandId);
       setHistory((items) => [...items.slice(-19), result]);
       setCommand("");

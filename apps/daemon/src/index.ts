@@ -697,22 +697,23 @@ async function buildServer(): Promise<void> {
     const parsed = z.object({
       cwd: z.string().min(1),
       command: z.string().trim().min(1).max(16_000),
-      commandId: z.string().uuid(),
+      commandId: z.string().uuid().optional(),
     }).safeParse(request.body);
     if (!parsed.success) return reply.code(400).send(failure(request, "invalid_command", "当前路径、命令和命令 ID 必须有效"));
     if (runningCommands.size >= 2) return reply.code(429).send(failure(request, "command_busy", "已有太多命令正在执行，请稍后重试", true));
-    if (runningCommands.has(parsed.data.commandId)) return reply.code(409).send(failure(request, "command_exists", "该命令已经在运行"));
+    const commandId = parsed.data.commandId ?? randomUUID();
+    if (runningCommands.has(commandId)) return reply.code(409).send(failure(request, "command_exists", "该命令已经在运行"));
     const controller = new AbortController();
-    runningCommands.set(parsed.data.commandId, controller);
+    runningCommands.set(commandId, controller);
     try {
       const cwd = await isLocalPath(parsed.data.cwd);
       if (!(await stat(cwd)).isDirectory()) return reply.code(400).send(failure(request, "not_directory", "命令路径不是文件夹"));
       const result = await runWorkspaceCommand({ command: parsed.data.command, cwd, shell: config.shellCommand, signal: controller.signal });
-      return ok(request, { ...result, commandId: parsed.data.commandId });
+      return ok(request, { ...result, commandId });
     } catch (error) {
       return reply.code(400).send(failure(request, "command_failed", error instanceof Error ? error.message : "命令执行失败"));
     } finally {
-      runningCommands.delete(parsed.data.commandId);
+      runningCommands.delete(commandId);
     }
   });
   daemon.delete<{ Params: { commandId: string } }>("/api/commands/:commandId", async (request, reply) => {
