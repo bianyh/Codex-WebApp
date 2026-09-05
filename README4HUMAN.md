@@ -70,6 +70,7 @@ Configuration is supplied through environment variables:
 | `CODEX_CWD` | daemon startup directory | Default working directory for new threads and Codex. |
 | `CODEX_WORKSPACE_ROOT` | parent of `CODEX_CWD` | Boundary for project browsing and new directories. |
 | `CODEX_COMMAND` | `codex` | Codex executable. Use an absolute path with version managers. |
+| `CODEX_CONSOLE_SHELL` | `$SHELL` or `/bin/bash` | Shell executable used by the direct command window. |
 | `CODEX_CONSOLE_SESSION_DAYS` | `7` | Session lifetime in days. |
 | `LOG_LEVEL` | `info` | Fastify log level. |
 
@@ -93,7 +94,11 @@ The WebApp stores only the model identifier and an optional display name. It pas
 
 ### Workspace commands
 
-The right context sidebar includes a command panel for the current thread directory. This is deliberately not a shell or PTY. The daemon tokenizes the command without a shell and permits only `pwd`, `ls`, and the read-only Git subcommands `status`, `diff`, `log`, `show`, `branch`, `rev-parse`, and `ls-files`. It rejects pipes, redirection, command chaining, mutating `git branch` arguments, unsupported options, and `ls` paths outside `CODEX_WORKSPACE_ROOT`. Each process has a 20-second timeout and a 256 KiB output limit, with at most two command processes running concurrently.
+The right context sidebar includes a direct shell-command window rooted at the current thread directory. It invokes `CODEX_CONSOLE_SHELL -c <command>` and supports any command available to the daemon's operating-system user, including pipes, redirection, command chaining, scripts, network clients, and mutating commands. These commands do not pass through Codex and do not use the Codex approval flow.
+
+This is a non-interactive shell rather than a PTY: programs that require terminal input, full-screen rendering, or password prompts may not work. Each command has a 10-minute timeout and a combined 1 MiB output limit, with at most two commands running concurrently. The UI can terminate the command's process group.
+
+`CODEX_WORKSPACE_ROOT` validates only the initial thread working directory. Once the shell starts, a command can use absolute paths or `cd` to access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to shell access to that account.
 
 ## Background Service on Linux
 
@@ -142,7 +147,7 @@ The external Turn detector reads rollout links through `/proc/<pid>/fd` for the 
 - Plain LAN HTTP is not encrypted. Use HTTPS for anything beyond a trusted private network.
 - Never commit `.env`, state files, uploaded attachments, cookies, tokens, SSH keys, or Codex credentials.
 - Keep `CODEX_WORKSPACE_ROOT` as narrow as practical.
-- The browser cannot execute an arbitrary shell. Direct workspace commands use the read-only allowlist above; commands requested by Codex continue to use the app-server approval protocol.
+- The authenticated command window can execute arbitrary shell commands as the daemon's OS user without Codex approval. Do not expose the service directly to the public Internet, use a strong unique password, and protect it with a VPN/Tailscale or HTTPS.
 - Keep the app-server on stdio; do not configure a public app-server listener.
 
 ## Development, Tests, and Protocol Updates

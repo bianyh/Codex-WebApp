@@ -80,6 +80,7 @@ CODEX_CONSOLE_DATA_DIR="$HOME/.local/state/codex-console" \
 - `CODEX_CONSOLE_HOST`：默认 `127.0.0.1`。手机访问时通常设为 `0.0.0.0`，但这会开放到所有网卡，必须配合局域网/VPN/HTTPS 安全措施。
 - `CODEX_CONSOLE_PORT`：默认 `8787`。端口冲突时先告诉用户并选择新端口，不要杀掉未知进程。
 - `CODEX_COMMAND`：Codex 不在 `PATH` 时填写绝对可执行文件路径。
+- `CODEX_CONSOLE_SHELL`：命令窗口使用的 Shell，默认取 `$SHELL`，否则为 `/bin/bash`。该窗口可绕过 Codex 审批执行 daemon 用户有权执行的任意命令，应只在受信网络中启用服务。
 - `CODEX_CONSOLE_ORIGIN`：使用固定域名或反向代理时填写完整 Origin，例如 `https://codex.example.com`。
 
 快速前台验证可以这样运行：

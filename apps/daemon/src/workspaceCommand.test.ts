@@ -1,30 +1,36 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { parseCommandLine, runWorkspaceCommand } from "./workspaceCommand.js";
+import { runWorkspaceCommand, validateShellCommand } from "./workspaceCommand.js";
 
-describe("workspace commands", () => {
-  it("parses quoted arguments without invoking a shell", () => {
-    expect(parseCommandLine("ls -la 'folder name'")).toEqual(["ls", "-la", "folder name"]);
-    expect(() => parseCommandLine("ls && pwd")).toThrow("不支持管道");
-    expect(() => parseCommandLine("ls 'unfinished")).toThrow("没有闭合");
+describe("workspace shell commands", () => {
+  it("validates empty, oversized, and null-containing commands", () => {
+    expect(() => validateShellCommand("  ")).toThrow("命令不能为空");
+    expect(() => validateShellCommand("x".repeat(16_001))).toThrow("16000");
+    expect(() => validateShellCommand("printf '\0'")).toThrow("空字符");
   });
 
-  it("runs allowed commands in the selected workspace directory", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "codex-console-command-"));
-    const cwd = path.join(root, "project");
-    await mkdir(cwd);
-    const result = await runWorkspaceCommand({ command: "pwd", cwd, workspaceRoot: root });
+  it("runs arbitrary shell syntax in the selected directory", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "codex-console-shell-"));
+    const result = await runWorkspaceCommand({
+      command: "printf 'hello' | tr a-z A-Z > result.txt && cat result.txt",
+      cwd,
+      shell: "/bin/bash",
+    });
     expect(result.exitCode).toBe(0);
-    expect(result.stdout.trim()).toBe(cwd);
+    expect(result.stdout).toBe("HELLO");
+    expect(await readFile(path.join(cwd, "result.txt"), "utf8")).toBe("HELLO");
   });
 
-  it("rejects shell commands, mutating Git commands, and paths outside the workspace", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "codex-console-command-"));
-    await expect(runWorkspaceCommand({ command: "sh -c whoami", cwd: root, workspaceRoot: root })).rejects.toThrow("仅支持");
-    await expect(runWorkspaceCommand({ command: "git branch -D main", cwd: root, workspaceRoot: root })).rejects.toThrow("仅支持查看");
-    await expect(runWorkspaceCommand({ command: "git branch new-branch", cwd: root, workspaceRoot: root })).rejects.toThrow("仅支持查看");
-    await expect(runWorkspaceCommand({ command: "ls /", cwd: root, workspaceRoot: root })).rejects.toThrow("必须位于工作区内");
+  it("stops a running process group through AbortSignal", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "codex-console-shell-"));
+    const controller = new AbortController();
+    const running = runWorkspaceCommand({ command: "sleep 30", cwd, shell: "/bin/bash", signal: controller.signal });
+    setTimeout(() => controller.abort(), 50);
+    const result = await running;
+    expect(result.aborted).toBe(true);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.durationMs).toBeLessThan(3000);
   });
 });

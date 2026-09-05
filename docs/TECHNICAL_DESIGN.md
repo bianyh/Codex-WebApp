@@ -27,7 +27,7 @@ OpenAI Docs 在当前网络环境下无法直接抓取正文，官方页面可�
 - 实时展示 Agent 消息、Reasoning 摘要、Plan、命令执行、文件修改、Diff、MCP 调用和错误。
 - 在手机上处理 Codex 的命令审批、文件修改审批和用户问题。
 - 发现 app-server 模型列表，并允许保存额外模型标识供本机已配置的第三方 Provider 使用。
-- 桌面左右侧栏独立折叠，在当前线程目录执行无 shell 的只读诊断命令。
+- 桌面左右侧栏独立折叠，在当前线程目录执行无需 Codex 审批的任意 Shell 命令。
 - 页面刷新或网络短暂断开后恢复当前线程和未显示事件。
 - 使用 PWA 安装到手机主屏幕，适配 iOS Safari 和 Android Chrome。
 
@@ -47,7 +47,7 @@ OpenAI Docs 在当前网络环境下无法直接抓取正文，官方页面可�
 - 不实现多租户、团队账号、角色权限和公共注册。
 - 不直接暴露 `codex app-server` 的公网 WebSocket。
 - 不通过截图、Chrome DevTools Protocol 或 tmux 屏幕抓取仿制 Codex UI。
-- 不提供任意 shell、PTY 或交互终端。直接命令只经过独立的只读白名单执行器；Codex 产生的其他命令仍按 app-server 审批协议处理。
+- 不实现交互式 PTY、终端复用和 SSH 协议。直接命令使用本机 Shell 非交互执行；Codex 产生的命令仍按 app-server 审批协议处理。
 
 ## 3. 总体架构
 
@@ -329,7 +329,7 @@ codex-console password change
 - 使用普通 OS 用户运行 Daemon 和 Codex，禁止 root。
 - 项目目录使用显式白名单；所有路径先 `realpath`，拒绝白名单外路径和符号链接逃逸。
 - 默认 Codex 沙箱为 `workspace-write`，默认审批策略为 `on-request`。
-- UI 的直接命令接口不启动 shell，只允许 `pwd`、`ls` 和只读 Git 子命令；限制工作目录、路径、参数、运行时间、输出量和并发数。它不替代 Codex 命令审批，也不扩展为 PTY。
+- UI 的直接命令接口启动 `CODEX_CONSOLE_SHELL -c`，不经过 Codex 审批，可执行 daemon 用户有权执行的任意命令。`CODEX_WORKSPACE_ROOT` 只验证初始工作目录，不能限制 Shell 后续通过绝对路径或 `cd` 访问其他位置。单条命令限制为 10 分钟、1 MiB 输出，同时最多两条；中止操作终止整个命令进程组。
 
 ## 8. 浏览器协议
 
@@ -357,6 +357,7 @@ POST /api/fs/directories
 GET  /api/fs/content?path=
 GET  /api/fs/raw?path=
 POST /api/commands
+DELETE /api/commands/:commandId
 
 GET  /api/threads?projectId=&cursor=
 GET  /api/threads/:threadId
@@ -419,7 +420,7 @@ type ServerEvent =
 
 - 左栏宽度 280-320px，可折叠；线程项显示标题、最近更新时间、运行状态点和未读标记。
 - 中栏是唯一主阅读流，消息按 Turn 分组；用户输入、Agent 文本、Reasoning、命令、文件修改和审批保持时间顺序。
-- 左右栏均可独立折叠并在本机浏览器中记住状态；右栏以 Tab 显示 Plan、Changed files、Diff、Files、受限命令和 Usage。
+- 左右栏均可独立折叠并在本机浏览器中记住状态；右栏以 Tab 显示 Plan、Changed files、Diff、Files、直接 Shell 命令和 Usage。
 - 顶部状态栏显示当前模型、推理强度、沙箱/审批模式、Token 用量和运行耗时。
 - Composer 固定在中栏底部，支持多行输入、图片附件入口、发送/停止按钮和“追加到当前 Turn”状态。
 

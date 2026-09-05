@@ -842,7 +842,9 @@ function ContextPanel({
             </div>
           </div>
         )}
-        {tab === "terminal" && <CommandPanel cwd={snapshot?.thread.cwd} />}
+        <div className={`command-panel-host ${tab === "terminal" ? "active" : ""}`}>
+          <CommandPanel cwd={snapshot?.thread.cwd} />
+        </div>
       </div>
     </aside>
   );

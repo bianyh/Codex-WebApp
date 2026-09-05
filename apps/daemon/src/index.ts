@@ -34,8 +34,8 @@ const queuedTurns = new Map<string, QueuedTurn[]>();
 const drainingQueues = new Set<string>();
 const turnOperations = new Map<string, Promise<void>>();
 let refreshingActivities: Promise<void> | null = null;
-let activeCommands = 0;
 let cachedOfficialModels: ModelOption[] = [];
+const runningCommands = new Map<string, AbortController>();
 const activityTracker = new ThreadActivityTracker(
   (threadId, turnId) => codex.ownsTurn(threadId, turnId),
   (rolloutPath) => externalCodex.ownerFor(rolloutPath),
@@ -462,7 +462,11 @@ async function buildServer(): Promise<void> {
   );
   const activityTimer = setInterval(scheduleThreadActivityRefresh, 1200);
   activityTimer.unref();
-  daemon.addHook("onClose", async () => { clearInterval(activityTimer); });
+  daemon.addHook("onClose", async () => {
+    clearInterval(activityTimer);
+    for (const controller of runningCommands.values()) controller.abort();
+    runningCommands.clear();
+  });
   daemon.get("/api/healthz", async (request) => ok(request, { ok: true, daemonVersion: "0.1.0", codexVersion: codex.version, appServer: codex.version === "unknown" ? "starting" : "ready", activeThreads: [...lastActivities.values()].filter((activity) => isTurnActiveStatus(activity.status)).length, loadedThreads: snapshots.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }));
   daemon.post<{ Body: { password?: string } }>("/api/auth/login", async (request, reply) => { await login(request, reply, typeof request.body?.password === "string" ? request.body.password : ""); return; });
   daemon.post("/api/auth/logout", async (request, reply) => { if (!(await requireAuth(request, reply))) return; await logout(request, reply); });
@@ -688,21 +692,35 @@ async function buildServer(): Promise<void> {
     } catch (error) { return reply.code(404).send(failure(request, "read_failed", error instanceof Error ? error.message : "无法读取文件")); }
   });
 
-  daemon.post<{ Body: { cwd?: string; command?: string } }>("/api/commands", async (request, reply) => {
+  daemon.post<{ Body: { cwd?: string; command?: string; commandId?: string } }>("/api/commands", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
-    const parsed = z.object({ cwd: z.string().min(1), command: z.string().trim().min(1).max(1000) }).safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_command", "当前路径和命令不能为空"));
-    if (activeCommands >= 2) return reply.code(429).send(failure(request, "command_busy", "已有太多命令正在执行，请稍后重试", true));
-    activeCommands += 1;
+    const parsed = z.object({
+      cwd: z.string().min(1),
+      command: z.string().trim().min(1).max(16_000),
+      commandId: z.string().uuid(),
+    }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_command", "当前路径、命令和命令 ID 必须有效"));
+    if (runningCommands.size >= 2) return reply.code(429).send(failure(request, "command_busy", "已有太多命令正在执行，请稍后重试", true));
+    if (runningCommands.has(parsed.data.commandId)) return reply.code(409).send(failure(request, "command_exists", "该命令已经在运行"));
+    const controller = new AbortController();
+    runningCommands.set(parsed.data.commandId, controller);
     try {
       const cwd = await isLocalPath(parsed.data.cwd);
       if (!(await stat(cwd)).isDirectory()) return reply.code(400).send(failure(request, "not_directory", "命令路径不是文件夹"));
-      return ok(request, await runWorkspaceCommand({ command: parsed.data.command, cwd, workspaceRoot: config.workspaceRoot }));
+      const result = await runWorkspaceCommand({ command: parsed.data.command, cwd, shell: config.shellCommand, signal: controller.signal });
+      return ok(request, { ...result, commandId: parsed.data.commandId });
     } catch (error) {
       return reply.code(400).send(failure(request, "command_failed", error instanceof Error ? error.message : "命令执行失败"));
     } finally {
-      activeCommands -= 1;
+      runningCommands.delete(parsed.data.commandId);
     }
+  });
+  daemon.delete<{ Params: { commandId: string } }>("/api/commands/:commandId", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const controller = runningCommands.get(request.params.commandId);
+    if (!controller) return reply.code(404).send(failure(request, "command_not_found", "命令已经结束或不存在"));
+    controller.abort();
+    return ok(request, null);
   });
 
   daemon.get<{ Querystring: { cwd?: string } }>("/api/threads", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const threads = await codex.listThreads(request.query.cwd); const enriched = await Promise.all(threads.map(async (thread) => { knownThreads.set(thread.id, thread); const result = await activityTracker.enrich(thread); result.canRetry = !isTurnActiveStatus(result.status) && codex.controlsThread(result.id); knownThreads.set(result.id, result); return publicThread(result); })); return ok(request, enriched); } catch (error) { return reply.code(503).send(failure(request, "codex_unavailable", error instanceof Error ? error.message : "Codex 不可用", true)); } });

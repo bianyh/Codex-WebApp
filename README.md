@@ -39,7 +39,7 @@ official codex app-server -> local projects and tools
 - Live Codex model discovery plus persistent custom model names for locally configured third-party providers.
 - Per-thread model selection, image/file/audio attachments, and desktop clipboard paste for images and files.
 - Authenticated workspace browsing, upload to the current directory, line-numbered text preview, media/PDF preview, file links, and copy-absolute-path actions.
-- Independently collapsible desktop sidebars and a bounded, read-only command panel for the current workspace path.
+- Independently collapsible desktop sidebars and an authenticated shell-command window rooted at the current thread path.
 - Light/dark themes and installable PWA support.
 
 ## Configure With Codex
