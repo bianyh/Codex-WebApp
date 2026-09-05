@@ -163,6 +163,9 @@ export class CodexProcess {
       const rl = createInterface({ input: child.stdout });
       rl.on("line", (line) => this.handleLine(line));
       child.stderr.on("data", (chunk) => process.stderr.write(`[codex] ${String(chunk)}`));
+      child.stdin.on("error", (error) => {
+        if (!this.stopping) this.rejectAll(error);
+      });
       child.once("error", (error) => {
         this.activeTurns.clear();
         this.loadedThreads.clear();
@@ -220,10 +223,17 @@ export class CodexProcess {
     if (!child?.stdin.writable) throw new Error("Codex app-server is unavailable");
     const id = this.nextId++;
     const message = JSON.stringify({ method, id, params: params ?? {} }) + "\n";
-    child.stdin.write(message);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.waiters.delete(id); reject(new Error(`RPC timeout: ${method}`)); }, timeoutMs);
       this.waiters.set(id, { resolve, reject, timer });
+      child.stdin.write(message, (error) => {
+        if (!error) return;
+        const waiter = this.waiters.get(id);
+        if (!waiter) return;
+        clearTimeout(waiter.timer);
+        this.waiters.delete(id);
+        waiter.reject(error);
+      });
     });
   }
 

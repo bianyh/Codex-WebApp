@@ -9,6 +9,11 @@ type State = {
   preferences: Record<string, unknown>;
 };
 
+export type CustomModel = {
+  model: string;
+  displayName: string;
+};
+
 const defaultState: State = { projects: [], sessions: [], preferences: {} };
 let state: State = structuredClone(defaultState);
 let initialized = false;
@@ -32,3 +37,24 @@ export async function persistState(): Promise<void> {
 }
 
 export function getState(): State { return state; }
+
+export function getCustomModels(): CustomModel[] {
+  const value = state.preferences?.customModels;
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const model = typeof (entry as Record<string, unknown>).model === "string"
+      ? String((entry as Record<string, unknown>).model).trim()
+      : "";
+    const displayName = typeof (entry as Record<string, unknown>).displayName === "string"
+      ? String((entry as Record<string, unknown>).displayName).trim()
+      : model;
+    return model ? [{ model, displayName: displayName || model }] : [];
+  });
+}
+
+export async function setCustomModels(models: CustomModel[]): Promise<void> {
+  state.preferences ??= {};
+  state.preferences.customModels = models;
+  await persistState();
+}

@@ -85,6 +85,16 @@ npm run start
 
 The workspace browser stays inside `CODEX_WORKSPACE_ROOT`. The Files panel can upload files directly to the current directory and copy each file's server-side absolute path. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
 
+### Custom models and providers
+
+The Settings dialog can store additional model identifiers that are not returned by the installed Codex version's `model/list` response. Custom entries are saved in the daemon state outside the repository and appear in the default-model, new-thread, and composer selectors on every device.
+
+The WebApp stores only the model identifier and an optional display name. It passes the identifier unchanged through the local app-server's `thread/start` and `turn/start` requests. Configure third-party API base URLs, providers, and credentials in the local Codex CLI configuration supported by your installed Codex version. Do not enter API keys in the model-name field or store them in WebApp state. A custom name does not make an unsupported provider available by itself; the local Codex configuration must already be able to resolve it.
+
+### Workspace commands
+
+The right context sidebar includes a command panel for the current thread directory. This is deliberately not a shell or PTY. The daemon tokenizes the command without a shell and permits only `pwd`, `ls`, and the read-only Git subcommands `status`, `diff`, `log`, `show`, `branch`, `rev-parse`, and `ls-files`. It rejects pipes, redirection, command chaining, mutating `git branch` arguments, unsupported options, and `ls` paths outside `CODEX_WORKSPACE_ROOT`. Each process has a 20-second timeout and a 256 KiB output limit, with at most two command processes running concurrently.
+
 ## Background Service on Linux
 
 The repository includes `deploy/codex-console.service`, a reusable user-level systemd template. It assumes the checkout is `~/Codex-WebApp` and that `node` and `codex` are in `PATH`. For any other installation, keep machine-specific values outside Git in `~/.config/codex-console/environment`:
@@ -132,7 +142,7 @@ The external Turn detector reads rollout links through `/proc/<pid>/fd` for the 
 - Plain LAN HTTP is not encrypted. Use HTTPS for anything beyond a trusted private network.
 - Never commit `.env`, state files, uploaded attachments, cookies, tokens, SSH keys, or Codex credentials.
 - Keep `CODEX_WORKSPACE_ROOT` as narrow as practical.
-- The browser cannot execute arbitrary shell commands. Commands originate from Codex app-server and are handled through the approval protocol.
+- The browser cannot execute an arbitrary shell. Direct workspace commands use the read-only allowlist above; commands requested by Codex continue to use the app-server approval protocol.
 - Keep the app-server on stdio; do not configure a public app-server listener.
 
 ## Development, Tests, and Protocol Updates

@@ -19,6 +19,7 @@ export type ModelOption = {
   displayName: string;
   description: string;
   isDefault: boolean;
+  isCustom?: boolean;
   inputModalities: Array<"text" | "image" | "audio">;
 };
 

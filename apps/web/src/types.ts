@@ -5,6 +5,6 @@ export type Snapshot = { thread: Thread; items: Item[]; pendingRequests: Request
 export type RequestQuestion = { id: string; header?: string; question: string; isSecret?: boolean; options?: Array<{ label: string; description?: string }>; };
 export type RequestItem = { id: string | number; method?: string; kind: string; title: string; detail?: string; command?: string; cwd?: string; questions?: RequestQuestion[]; tool?: string; arguments?: unknown; createdAt: string; };
 export type TimelineEvent = { method: string; params: Record<string, unknown>; };
-export type ModelOption = { id: string; model: string; displayName: string; description: string; isDefault: boolean; inputModalities: Array<"text" | "image" | "audio">; };
+export type ModelOption = { id: string; model: string; displayName: string; description: string; isDefault: boolean; isCustom?: boolean; inputModalities: Array<"text" | "image" | "audio">; };
 export type UploadAttachment = { id: string; name: string; path: string; mime: string; size: number; kind: "image" | "audio" | "file"; previewUrl?: string; };
 export type ThemeMode = "dark" | "light";

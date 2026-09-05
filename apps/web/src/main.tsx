@@ -37,7 +37,10 @@ import {
   Menu,
   MessageSquare,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRight,
+  PanelRightClose,
   Paperclip,
   Pause,
   PencilLine,
@@ -71,6 +74,7 @@ import { normalizeMarkdownMath } from "./markdown";
 import { createOptimisticUserItem, mergeTimelineItem, textFromRawItem } from "./messageState";
 import { NewThreadDialog } from "./NewThreadDialog";
 import { SettingsDialog } from "./SettingsDialog";
+import { CommandPanel } from "./CommandPanel";
 import "./styles.css";
 import "katex/dist/katex.min.css";
 
@@ -88,6 +92,8 @@ const storedThreadModels = (): Record<string, string> => {
     return {};
   }
 };
+
+const storedBoolean = (key: string): boolean => localStorage.getItem(key) === "true";
 
 const api = async <T,>(url: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(url, {
@@ -291,6 +297,7 @@ function ThreadDrawer({
   onSelect,
   onCreate,
   onSettings,
+  onCollapse,
   open,
   onClose,
 }: {
@@ -299,6 +306,7 @@ function ThreadDrawer({
   onSelect: (id: string) => void;
   onCreate: () => void;
   onSettings: () => void;
+  onCollapse: () => void;
   open: boolean;
   onClose: () => void;
 }) {
@@ -317,13 +325,10 @@ function ThreadDrawer({
           </div>
           <span>Codex Console</span>
         </div>
-        <button
-          className="icon-button mobile-only"
-          onClick={onClose}
-          aria-label="关闭侧栏"
-        >
-          <X size={18} />
-        </button>
+        <div className="drawer-head-actions">
+          <button className="icon-button desktop-only" onClick={onCollapse} aria-label="收起线程侧栏" title="收起线程侧栏"><PanelLeftClose size={18} /></button>
+          <button className="icon-button mobile-only" onClick={onClose} aria-label="关闭侧栏"><X size={18} /></button>
+        </div>
       </div>
       <button className="new-thread-button" onClick={onCreate}>
         <Plus size={17} />
@@ -727,12 +732,14 @@ function ContextPanel({
   setTab,
   onOpenFile,
   onClose,
+  onCollapse,
 }: {
   snapshot: Snapshot | null;
   tab: string;
   setTab: (tab: string) => void;
   onOpenFile: (entry: FsEntry) => void;
   onClose?: () => void;
+  onCollapse?: () => void;
 }) {
   return (
     <aside className="context-panel">
@@ -741,21 +748,17 @@ function ContextPanel({
           <span className="eyebrow">INSPECT</span>
           <h3>线程上下文</h3>
         </div>
-        {onClose && (
-          <button
-            className="icon-button mobile-only"
-            onClick={onClose}
-            aria-label="关闭上下文"
-          >
-            <X size={18} />
-          </button>
-        )}
+        <div className="context-head-actions">
+          {onCollapse && <button className="icon-button desktop-only" onClick={onCollapse} aria-label="收起上下文侧栏" title="收起上下文侧栏"><PanelRightClose size={18} /></button>}
+          {onClose && <button className="icon-button mobile-only" onClick={onClose} aria-label="关闭上下文"><X size={18} /></button>}
+        </div>
       </div>
       <div className="context-tabs">
         {[
           ["plan", "Plan", ListChecks],
           ["diff", "Diff", GitBranch],
           ["files", "Files", Folder],
+          ["terminal", "命令", Terminal],
           ["usage", "Usage", Activity],
         ].map(([key, label, Icon]) => (
           <button
@@ -769,7 +772,7 @@ function ContextPanel({
         ))}
       </div>
       <div
-        className={`context-content ${tab === "files" ? "files-context" : ""}`}
+        className={`context-content ${tab === "files" ? "files-context" : ""} ${tab === "terminal" ? "terminal-context" : ""}`}
       >
         {tab === "plan" && (
           <div className="context-block">
@@ -839,6 +842,7 @@ function ContextPanel({
             </div>
           </div>
         )}
+        {tab === "terminal" && <CommandPanel cwd={snapshot?.thread.cwd} />}
       </div>
     </aside>
   );
@@ -852,6 +856,8 @@ function App() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [contextTab, setContextTab] = useState("plan");
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => storedBoolean("codex-console-left-sidebar-collapsed"));
+  const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(() => storedBoolean("codex-console-right-sidebar-collapsed"));
   const [connection, setConnection] = useState("connecting");
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -928,6 +934,12 @@ function App() {
     localStorage.setItem("codex-console-thread-models", JSON.stringify(threadModels));
   }, [threadModels]);
   useEffect(() => {
+    localStorage.setItem("codex-console-left-sidebar-collapsed", String(leftSidebarCollapsed));
+  }, [leftSidebarCollapsed]);
+  useEffect(() => {
+    localStorage.setItem("codex-console-right-sidebar-collapsed", String(rightSidebarCollapsed));
+  }, [rightSidebarCollapsed]);
+  useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
   useEffect(() => {
@@ -1003,6 +1015,22 @@ function App() {
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : "无法读取模型列表"));
   }, [authenticated]);
+  const addCustomModel = async (model: string, displayName?: string) => {
+    const entry = await api<ModelOption>("/api/models/custom", {
+      method: "POST",
+      body: JSON.stringify({ model, displayName }),
+    });
+    setModels((current) => current.some((item) => item.model === entry.model) ? current : [...current, entry]);
+  };
+  const deleteCustomModel = async (model: string) => {
+    await api<null>("/api/models/custom", {
+      method: "DELETE",
+      body: JSON.stringify({ model }),
+    });
+    setModels((current) => current.filter((entry) => !(entry.isCustom && entry.model === model)));
+    setDefaultModel((current) => current === model ? "" : current);
+    setThreadModels((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value !== model)));
+  };
   const subscribe = useCallback((threadId: string) => {
     const current = wsRef.current;
     if (current?.readyState === WebSocket.OPEN)
@@ -1566,18 +1594,20 @@ function App() {
     setVisibleStart(Math.max(0, timelineStart - TIMELINE_CHUNK_SIZE));
   };
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${leftSidebarCollapsed ? "left-collapsed" : ""} ${rightSidebarCollapsed ? "right-collapsed" : ""}`}>
       <ThreadDrawer
         threads={threads}
         selected={selected}
         onSelect={setSelected}
         onCreate={() => setNewThreadOpen(true)}
         onSettings={() => { setSettingsOpen(true); setDrawerOpen(false); }}
+        onCollapse={() => setLeftSidebarCollapsed(true)}
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
       />
       <main className="main-column">
         <header className="topbar">
+          {leftSidebarCollapsed && <button className="icon-button desktop-only" onClick={() => setLeftSidebarCollapsed(false)} aria-label="打开线程侧栏" title="打开线程侧栏"><PanelLeftOpen size={19} /></button>}
           <button
             className="icon-button mobile-only"
             onClick={() => setDrawerOpen(true)}
@@ -1608,8 +1638,12 @@ function App() {
             </button>
             <button
               className="icon-button"
-              onClick={() => setContextOpen(true)}
-              aria-label="打开上下文"
+              onClick={() => {
+                if (window.matchMedia("(min-width: 1121px)").matches) setRightSidebarCollapsed((value) => !value);
+                else setContextOpen(true);
+              }}
+              aria-label="切换上下文侧栏"
+              title="切换上下文侧栏"
             >
               <PanelRight size={18} />
             </button>
@@ -1863,6 +1897,7 @@ function App() {
           tab={contextTab}
           setTab={setContextTab}
           onOpenFile={setPreviewEntry}
+          onCollapse={() => setRightSidebarCollapsed(true)}
         />
       </aside>
       {newThreadOpen && (
@@ -1881,6 +1916,8 @@ function App() {
           defaultModel={defaultModel}
           onThemeChange={setTheme}
           onDefaultModelChange={setDefaultModel}
+          onAddCustomModel={addCustomModel}
+          onDeleteCustomModel={deleteCustomModel}
           onClose={() => setSettingsOpen(false)}
         />
       )}

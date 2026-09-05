@@ -10,12 +10,13 @@ import fastifyStatic from "@fastify/static";
 import { WebSocket } from "ws";
 import { z } from "zod";
 import { allowedOrigin, config } from "./config.js";
-import { loadState, getState, persistState } from "./state.js";
+import { loadState, getCustomModels, getState, persistState, setCustomModels } from "./state.js";
 import { authenticated, login, logout, requireAuth, setPassword } from "./auth.js";
 import { CodexProcess, errorTextFromRaw, itemFromRaw } from "./codex.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import { ThreadActivityTracker, type ThreadActivity } from "./threadActivity.js";
-import type { ConsoleEvent, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
+import { runWorkspaceCommand } from "./workspaceCommand.js";
+import type { ConsoleEvent, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
 
 const daemon = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
 const codex = new CodexProcess();
@@ -33,6 +34,8 @@ const queuedTurns = new Map<string, QueuedTurn[]>();
 const drainingQueues = new Set<string>();
 const turnOperations = new Map<string, Promise<void>>();
 let refreshingActivities: Promise<void> | null = null;
+let activeCommands = 0;
+let cachedOfficialModels: ModelOption[] = [];
 const activityTracker = new ThreadActivityTracker(
   (threadId, turnId) => codex.ownsTurn(threadId, turnId),
   (rolloutPath) => externalCodex.ownerFor(rolloutPath),
@@ -69,6 +72,29 @@ function broadcast(payload: unknown, threadId?: string): void {
 
 const uploadRoot = path.join(config.dataDir, "uploads");
 const maxUploadBytes = 25 * 1024 * 1024;
+
+function customModelOption(model: string, displayName: string): ModelOption {
+  return {
+    id: `custom:${model}`,
+    model,
+    displayName,
+    description: "自定义模型名称，由本机 Codex 配置的模型提供商解析",
+    isDefault: false,
+    isCustom: true,
+    inputModalities: ["text", "image", "audio"],
+  };
+}
+
+function mergeModels(official: ModelOption[]): ModelOption[] {
+  const result = [...official];
+  const known = new Set(official.map((entry) => entry.model));
+  for (const entry of getCustomModels()) {
+    if (known.has(entry.model)) continue;
+    result.push(customModelOption(entry.model, entry.displayName));
+    known.add(entry.model);
+  }
+  return result;
+}
 
 function queueTurn(threadId: string, input: TurnInput, model?: string): string {
   const id = randomUUID();
@@ -444,8 +470,11 @@ async function buildServer(): Promise<void> {
   daemon.get("/api/models", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
     try {
-      return ok(request, await codex.listModels());
+      cachedOfficialModels = await codex.listModels();
+      return ok(request, mergeModels(cachedOfficialModels));
     } catch (error) {
+      const customModels = mergeModels([]);
+      if (customModels.length > 0) return ok(request, customModels);
       return reply.code(503).send(
         failure(
           request,
@@ -455,6 +484,34 @@ async function buildServer(): Promise<void> {
         ),
       );
     }
+  });
+  daemon.post<{ Body: { model?: string; displayName?: string } }>("/api/models/custom", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.object({
+      model: z.string().trim().min(1).max(160).regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+\-]*$/, "模型名只能包含字母、数字、点、横线、下划线、斜线、冒号、@ 和加号"),
+      displayName: z.string().trim().max(160).refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "显示名称不能包含控制字符").optional(),
+    }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_model", parsed.error.issues[0]?.message ?? "模型名无效"));
+    const models = getCustomModels();
+    if (models.some((entry) => entry.model === parsed.data.model)) {
+      return reply.code(409).send(failure(request, "model_exists", "该自定义模型已经存在"));
+    }
+    if (cachedOfficialModels.some((entry) => entry.model === parsed.data.model)) {
+      return reply.code(409).send(failure(request, "model_exists", "该模型已经由 Codex 提供，无需重复添加"));
+    }
+    const entry = { model: parsed.data.model, displayName: parsed.data.displayName || parsed.data.model };
+    await setCustomModels([...models, entry]);
+    return reply.code(201).send(ok(request, customModelOption(entry.model, entry.displayName)));
+  });
+  daemon.delete<{ Body: { model?: string } }>("/api/models/custom", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.object({ model: z.string().trim().min(1).max(160) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_model", "模型名无效"));
+    const models = getCustomModels();
+    const next = models.filter((entry) => entry.model !== parsed.data.model);
+    if (next.length === models.length) return reply.code(404).send(failure(request, "model_not_found", "没有找到该自定义模型"));
+    await setCustomModels(next);
+    return ok(request, null);
   });
 
   daemon.post<{
@@ -629,6 +686,23 @@ async function buildServer(): Promise<void> {
       reply.header("Content-Length", String(metadata.size));
       return reply.send(createReadStream(filePath));
     } catch (error) { return reply.code(404).send(failure(request, "read_failed", error instanceof Error ? error.message : "无法读取文件")); }
+  });
+
+  daemon.post<{ Body: { cwd?: string; command?: string } }>("/api/commands", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.object({ cwd: z.string().min(1), command: z.string().trim().min(1).max(1000) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_command", "当前路径和命令不能为空"));
+    if (activeCommands >= 2) return reply.code(429).send(failure(request, "command_busy", "已有太多命令正在执行，请稍后重试", true));
+    activeCommands += 1;
+    try {
+      const cwd = await isLocalPath(parsed.data.cwd);
+      if (!(await stat(cwd)).isDirectory()) return reply.code(400).send(failure(request, "not_directory", "命令路径不是文件夹"));
+      return ok(request, await runWorkspaceCommand({ command: parsed.data.command, cwd, workspaceRoot: config.workspaceRoot }));
+    } catch (error) {
+      return reply.code(400).send(failure(request, "command_failed", error instanceof Error ? error.message : "命令执行失败"));
+    } finally {
+      activeCommands -= 1;
+    }
   });
 
   daemon.get<{ Querystring: { cwd?: string } }>("/api/threads", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const threads = await codex.listThreads(request.query.cwd); const enriched = await Promise.all(threads.map(async (thread) => { knownThreads.set(thread.id, thread); const result = await activityTracker.enrich(thread); result.canRetry = !isTurnActiveStatus(result.status) && codex.controlsThread(result.id); knownThreads.set(result.id, result); return publicThread(result); })); return ok(request, enriched); } catch (error) { return reply.code(503).send(failure(request, "codex_unavailable", error instanceof Error ? error.message : "Codex 不可用", true)); } });

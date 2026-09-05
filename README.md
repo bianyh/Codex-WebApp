@@ -36,8 +36,10 @@ official codex app-server -> local projects and tools
 - Edit and resend the latest user message.
 - Separate user, execution-progress, and final-answer messages, with collapsible execution details.
 - Markdown/GFM and LaTeX/KaTeX rendering.
-- Model selection, image/file/audio attachments, and desktop clipboard paste for images and files.
+- Live Codex model discovery plus persistent custom model names for locally configured third-party providers.
+- Per-thread model selection, image/file/audio attachments, and desktop clipboard paste for images and files.
 - Authenticated workspace browsing, upload to the current directory, line-numbered text preview, media/PDF preview, file links, and copy-absolute-path actions.
+- Independently collapsible desktop sidebars and a bounded, read-only command panel for the current workspace path.
 - Light/dark themes and installable PWA support.
 
 ## Configure With Codex

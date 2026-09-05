@@ -26,6 +26,8 @@ OpenAI Docs 在当前网络环境下无法直接抓取正文，官方页面可�
 - 创建线程、恢复线程、发送新 Turn、运行中追加指令、打断 Turn。
 - 实时展示 Agent 消息、Reasoning 摘要、Plan、命令执行、文件修改、Diff、MCP 调用和错误。
 - 在手机上处理 Codex 的命令审批、文件修改审批和用户问题。
+- 发现 app-server 模型列表，并允许保存额外模型标识供本机已配置的第三方 Provider 使用。
+- 桌面左右侧栏独立折叠，在当前线程目录执行无 shell 的只读诊断命令。
 - 页面刷新或网络短暂断开后恢复当前线程和未显示事件。
 - 使用 PWA 安装到手机主屏幕，适配 iOS Safari 和 Android Chrome。
 
@@ -45,7 +47,7 @@ OpenAI Docs 在当前网络环境下无法直接抓取正文，官方页面可�
 - 不实现多租户、团队账号、角色权限和公共注册。
 - 不直接暴露 `codex app-server` 的公网 WebSocket。
 - 不通过截图、Chrome DevTools Protocol 或 tmux 屏幕抓取仿制 Codex UI。
-- 不允许前端任意执行 shell；所有命令必须由 Codex app-server 产生并按审批协议处理。
+- 不提供任意 shell、PTY 或交互终端。直接命令只经过独立的只读白名单执行器；Codex 产生的其他命令仍按 app-server 审批协议处理。
 
 ## 3. 总体架构
 
@@ -327,7 +329,7 @@ codex-console password change
 - 使用普通 OS 用户运行 Daemon 和 Codex，禁止 root。
 - 项目目录使用显式白名单；所有路径先 `realpath`，拒绝白名单外路径和符号链接逃逸。
 - 默认 Codex 沙箱为 `workspace-write`，默认审批策略为 `on-request`。
-- UI 不提供直接执行任意命令的接口；如需终端，后续单独设计受限 PTY 模块并重新做威胁建模。
+- UI 的直接命令接口不启动 shell，只允许 `pwd`、`ls` 和只读 Git 子命令；限制工作目录、路径、参数、运行时间、输出量和并发数。它不替代 Codex 命令审批，也不扩展为 PTY。
 
 ## 8. 浏览器协议
 
@@ -341,6 +343,10 @@ POST /api/auth/login
 POST /api/auth/logout
 GET  /api/auth/me
 
+GET    /api/models
+POST   /api/models/custom
+DELETE /api/models/custom
+
 GET  /api/projects
 POST /api/projects
 PATCH /api/projects/:projectId
@@ -350,6 +356,7 @@ POST /api/fs/upload?path=&name=&mime=
 POST /api/fs/directories
 GET  /api/fs/content?path=
 GET  /api/fs/raw?path=
+POST /api/commands
 
 GET  /api/threads?projectId=&cursor=
 GET  /api/threads/:threadId
@@ -400,7 +407,7 @@ type ServerEvent =
 ┌──────────────┬──────────────────────────────────────┬─────────────────┐
 │ 线程/项目栏   │ 当前线程时间线                         │ 上下文/检查栏     │
 │              │                                      │                 │
-│ 搜索          │ 顶部：标题、状态、模型、用量、更多操作 │ Plan             │
+│ 搜索          │ 顶部：标题、状态、模型、用量、更多操作 │ Plan / Command   │
 │ 项目切换      │                                      │ Changed files   │
 │ 最近线程      │ 用户消息                             │ Diff            │
 │ 归档线程      │ Agent 消息                            │ Files           │
@@ -412,7 +419,7 @@ type ServerEvent =
 
 - 左栏宽度 280-320px，可折叠；线程项显示标题、最近更新时间、运行状态点和未读标记。
 - 中栏是唯一主阅读流，消息按 Turn 分组；用户输入、Agent 文本、Reasoning、命令、文件修改和审批保持时间顺序。
-- 右栏宽度 320-420px，以 Tab 或可拖拽面板显示 Plan、Changed files、Diff、Files、Usage。
+- 左右栏均可独立折叠并在本机浏览器中记住状态；右栏以 Tab 显示 Plan、Changed files、Diff、Files、受限命令和 Usage。
 - 顶部状态栏显示当前模型、推理强度、沙箱/审批模式、Token 用量和运行耗时。
 - Composer 固定在中栏底部，支持多行输入、图片附件入口、发送/停止按钮和“追加到当前 Turn”状态。
 
