@@ -94,11 +94,11 @@ The WebApp stores only the model identifier and an optional display name. It pas
 
 ### Workspace commands
 
-The right context sidebar includes a direct shell-command window rooted at the current thread directory. It invokes `CODEX_CONSOLE_SHELL -c <command>` and supports any command available to the daemon's operating-system user, including pipes, redirection, command chaining, scripts, network clients, and mutating commands. These commands do not pass through Codex and do not use the Codex approval flow.
+The right context sidebar includes a direct shell-command window. Its directory field defaults to the current thread directory, but you may enter any existing directory on the server that the daemon's operating-system user can access. It invokes `CODEX_CONSOLE_SHELL -c <command>` and supports any command available to that user, including pipes, redirection, command chaining, scripts, network clients, and mutating commands. These commands do not pass through Codex and do not use the Codex approval flow.
 
 This is a non-interactive shell rather than a PTY: programs that require terminal input, full-screen rendering, or password prompts may not work. Each command has a 10-minute timeout and a combined 1 MiB output limit, with at most two commands running concurrently. The UI can terminate the command's process group.
 
-`CODEX_WORKSPACE_ROOT` validates only the initial thread working directory. Once the shell starts, a command can use absolute paths or `cd` to access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to shell access to that account.
+`CODEX_WORKSPACE_ROOT` does not restrict this command window. The daemon only canonicalizes the selected initial directory and verifies that it exists; once the shell starts, a command can use absolute paths or `cd` to access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to shell access to that account. The workspace browser, file uploads, and new-directory UI remain restricted to `CODEX_WORKSPACE_ROOT`.
 
 ## Background Service on Linux
 

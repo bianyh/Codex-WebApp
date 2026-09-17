@@ -93,6 +93,9 @@ code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospac
 .command-panel-host { display: none; height: 100%; min-height: 0; }.command-panel-host.active { display: block; }
 .command-toolbar { flex: 0 0 42px; min-width: 0; display: flex; align-items: center; gap: 7px; padding: 0 9px 0 12px; border-bottom: 1px solid #292d34; color: #7f8b9b; }
 .command-toolbar code { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8793a3; font-size: 9px; }
+.command-cwd-input { min-width: 0; flex: 1; height: 28px; border: 1px solid #303640; border-radius: 4px; outline: 0; padding: 0 7px; background: #101216; color: #aeb9c8; font: 9px "SFMono-Regular", Consolas, monospace; }
+.command-cwd-input:focus { border-color: #657995; color: #e0e6ee; }
+.command-cwd-input:disabled { opacity: .65; }
 .command-toolbar button, .command-input-row button { flex: 0 0 29px; width: 29px; height: 29px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: #7c8795; }
 .command-toolbar button:hover:not(:disabled), .command-input-row button:hover:not(:disabled) { background: #242a32; color: #eef2f6; }
 .command-history { min-height: 0; flex: 1; overflow: auto; padding: 10px; }
@@ -299,6 +302,7 @@ html[data-theme="light"] .file-copy-button:hover { background: #dfe5eb; color: #
 html[data-theme="light"] .command-panel { background: #f5f7f9; }
 html[data-theme="light"] .command-toolbar, html[data-theme="light"] .command-input-row { background: #fff; border-color: #d8dee6; color: #5f6b79; }
 html[data-theme="light"] .command-input-row input, html[data-theme="light"] .command-toolbar code { color: #2b3541; }
+html[data-theme="light"] .command-cwd-input { background: #f5f7f9; border-color: #cdd4dd; color: #344252; }
 html[data-theme="light"] .command-result { background: #fff; border-color: #d8dee6; }
 html[data-theme="light"] .command-result header { border-color: #d8dee6; }
 html[data-theme="light"] .command-result header code, html[data-theme="light"] .command-result pre { color: #344252; }

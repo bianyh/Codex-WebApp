@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CircleAlert, LoaderCircle, Play, Square, Terminal, Trash2 } from "lucide-react";
 import { createCommandId } from "./commandId";
 
@@ -36,6 +36,7 @@ async function stopCommand(commandId: string): Promise<void> {
 }
 
 export function CommandPanel({ cwd }: { cwd?: string }) {
+  const [workingDirectory, setWorkingDirectory] = useState(cwd ?? "");
   const [command, setCommand] = useState("");
   const [runningCommandId, setRunningCommandId] = useState("");
   const [stopping, setStopping] = useState(false);
@@ -44,13 +45,14 @@ export function CommandPanel({ cwd }: { cwd?: string }) {
 
   const run = async () => {
     const value = command.trim();
-    if (!cwd || !value || runningCommandId) return;
+    const directory = workingDirectory.trim();
+    if (!directory || !value || runningCommandId) return;
     setError("");
     let commandId = "";
     try {
       commandId = createCommandId();
       setRunningCommandId(commandId);
-      const result = await executeCommand(cwd, value, commandId);
+      const result = await executeCommand(directory, value, commandId);
       setHistory((items) => [...items.slice(-19), result]);
       setCommand("");
     } catch (reason) {
@@ -60,6 +62,9 @@ export function CommandPanel({ cwd }: { cwd?: string }) {
       setStopping(false);
     }
   };
+  useEffect(() => {
+    setWorkingDirectory(cwd ?? "");
+  }, [cwd]);
   const stop = async () => {
     if (!runningCommandId || stopping) return;
     setStopping(true);
@@ -76,7 +81,7 @@ export function CommandPanel({ cwd }: { cwd?: string }) {
     <div className="command-panel">
       <div className="command-toolbar">
         <Terminal size={14} />
-        <code title={cwd}>{cwd ?? "未选择线程"}</code>
+        <input className="command-cwd-input" value={workingDirectory} onChange={(event) => setWorkingDirectory(event.target.value)} placeholder="输入任意服务器目录" aria-label="命令工作目录" title="命令会以此目录作为初始工作目录" autoCapitalize="none" autoCorrect="off" spellCheck={false} disabled={Boolean(runningCommandId)} />
         <button disabled={history.length === 0 || Boolean(runningCommandId)} onClick={() => setHistory([])} aria-label="清空命令输出" title="清空输出"><Trash2 size={14} /></button>
       </div>
       <div className="command-history" aria-live="polite">
@@ -91,10 +96,10 @@ export function CommandPanel({ cwd }: { cwd?: string }) {
       {error && <div className="command-error"><CircleAlert size={14} />{error}</div>}
       <div className="command-input-row">
         <span>$</span>
-        <input value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void run(); }} disabled={!cwd || Boolean(runningCommandId)} placeholder="输入 Shell 命令" aria-label="命令" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+        <input value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void run(); }} disabled={!workingDirectory.trim() || Boolean(runningCommandId)} placeholder="输入 Shell 命令" aria-label="命令" autoCapitalize="none" autoCorrect="off" spellCheck={false} />
         {runningCommandId
           ? <button className="running" disabled={stopping} onClick={() => void stop()} aria-label="中止命令" title="中止命令">{stopping ? <LoaderCircle className="spin" size={15} /> : <Square size={14} fill="currentColor" />}</button>
-          : <button disabled={!cwd || !command.trim()} onClick={() => void run()} aria-label="执行命令" title="执行命令"><Play size={15} /></button>}
+          : <button disabled={!workingDirectory.trim() || !command.trim()} onClick={() => void run()} aria-label="执行命令" title="执行命令"><Play size={15} /></button>}
       </div>
     </div>
   );

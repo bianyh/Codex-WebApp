@@ -27,7 +27,7 @@ OpenAI Docs 在当前网络环境下无法直接抓取正文，官方页面可�
 - 实时展示 Agent 消息、Reasoning 摘要、Plan、命令执行、文件修改、Diff、MCP 调用和错误。
 - 在手机上处理 Codex 的命令审批、文件修改审批和用户问题。
 - 发现 app-server 模型列表，并允许保存额外模型标识供本机已配置的第三方 Provider 使用。
-- 桌面左右侧栏独立折叠，在当前线程目录执行无需 Codex 审批的任意 Shell 命令。
+- 桌面左右侧栏独立折叠，在可编辑的任意服务器目录执行无需 Codex 审批的任意 Shell 命令。
 - 页面刷新或网络短暂断开后恢复当前线程和未显示事件。
 - 使用 PWA 安装到手机主屏幕，适配 iOS Safari 和 Android Chrome。
 
@@ -329,7 +329,7 @@ codex-console password change
 - 使用普通 OS 用户运行 Daemon 和 Codex，禁止 root。
 - 项目目录使用显式白名单；所有路径先 `realpath`，拒绝白名单外路径和符号链接逃逸。
 - 默认 Codex 沙箱为 `workspace-write`，默认审批策略为 `on-request`。
-- UI 的直接命令接口启动 `CODEX_CONSOLE_SHELL -c`，不经过 Codex 审批，可执行 daemon 用户有权执行的任意命令。`CODEX_WORKSPACE_ROOT` 只验证初始工作目录，不能限制 Shell 后续通过绝对路径或 `cd` 访问其他位置。单条命令限制为 10 分钟、1 MiB 输出，同时最多两条；中止操作终止整个命令进程组。
+- UI 的直接命令接口启动 `CODEX_CONSOLE_SHELL -c`，不经过 Codex 审批，可执行 daemon 用户有权执行的任意命令。目录字段默认当前线程目录，也可选择任意存在的服务器目录；`CODEX_WORKSPACE_ROOT` 不参与该接口的目录校验，Shell 后续也可通过绝对路径或 `cd` 访问其他位置。单条命令限制为 10 分钟、1 MiB 输出，同时最多两条；中止操作终止整个命令进程组。文件浏览、上传和新建目录仍使用工作区边界。
 
 ## 8. 浏览器协议
 

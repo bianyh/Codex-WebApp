@@ -409,6 +409,19 @@ function isLocalPath(value: string): Promise<string> {
   });
 }
 
+/**
+ * Direct shell commands intentionally have a wider scope than the workspace
+ * browser. Resolve the initial working directory for the daemon user without
+ * applying CODEX_WORKSPACE_ROOT; the shell itself runs with that user's normal
+ * operating-system permissions.
+ */
+async function resolveCommandPath(value: string): Promise<string> {
+  const candidate = path.isAbsolute(value) ? value : path.resolve(config.codexCwd, value);
+  const resolved = await realpath(candidate);
+  if (!(await stat(resolved)).isDirectory()) throw new Error("命令路径不是文件夹");
+  return resolved;
+}
+
 const textExtensions = new Set([".txt", ".md", ".mdx", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".csv", ".tsv", ".log", ".xml", ".html", ".css", ".scss", ".less", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".py", ".rs", ".go", ".java", ".kt", ".kts", ".c", ".h", ".cc", ".cpp", ".hpp", ".sh", ".bash", ".zsh", ".fish", ".sql", ".tex", ".bib", ".vue", ".svelte", ".env", ".gitignore"]);
 const mimeTypes: Record<string, string> = {
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".svg": "image/svg+xml", ".avif": "image/avif",
@@ -706,8 +719,7 @@ async function buildServer(): Promise<void> {
     const controller = new AbortController();
     runningCommands.set(commandId, controller);
     try {
-      const cwd = await isLocalPath(parsed.data.cwd);
-      if (!(await stat(cwd)).isDirectory()) return reply.code(400).send(failure(request, "not_directory", "命令路径不是文件夹"));
+      const cwd = await resolveCommandPath(parsed.data.cwd);
       const result = await runWorkspaceCommand({ command: parsed.data.command, cwd, shell: config.shellCommand, signal: controller.signal });
       return ok(request, { ...result, commandId });
     } catch (error) {
