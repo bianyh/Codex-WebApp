@@ -654,6 +654,67 @@ async function buildServer(): Promise<void> {
     }
   });
 
+  daemon.get<{ Querystring: { path?: string } }>("/api/fs/server-directories", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    try {
+      const directory = await resolveServerDirectory(request.query.path || config.codexCwd, config.codexCwd);
+      const dirents = await readdir(directory, { withFileTypes: true });
+      const entries = await Promise.all(dirents.slice(0, 1000).map(async (entry) => {
+        try {
+          const resolved = await resolveServerDirectory(path.join(directory, entry.name), directory);
+          const metadata = await stat(resolved);
+          return {
+            name: entry.name,
+            path: resolved,
+            type: "directory" as const,
+            kind: "directory" as const,
+            size: metadata.size,
+            modifiedAt: metadata.mtime.toISOString(),
+            hidden: entry.name.startsWith("."),
+          };
+        } catch {
+          return null;
+        }
+      }));
+      const visible = entries
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const root = path.parse(directory).root;
+      return ok(request, {
+        path: directory,
+        root,
+        parent: directory === root ? null : path.dirname(directory),
+        entries: visible,
+        truncated: dirents.length > 1000,
+      });
+    } catch (error) {
+      return reply.code(400).send(failure(request, "invalid_path", error instanceof Error ? error.message : "无法读取服务器目录"));
+    }
+  });
+
+  daemon.post<{ Body: { parent?: string; name?: string } }>("/api/fs/server-directories", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.object({
+      parent: z.string().min(1),
+      name: z.string().trim().min(1).max(120).refine(
+        (name) => name !== "." && name !== ".." && !/[\\/\u0000-\u001f\u007f]/.test(name),
+        "文件夹名称不能包含路径分隔符或控制字符",
+      ),
+    }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_directory_name", parsed.error.issues[0]?.message ?? "文件夹名称无效"));
+    try {
+      const parent = await resolveServerDirectory(parsed.data.parent, config.codexCwd);
+      const directory = path.join(parent, parsed.data.name);
+      await mkdir(directory, { mode: 0o700 });
+      const canonicalPath = await resolveServerDirectory(directory, config.codexCwd);
+      return reply.code(201).send(ok(request, { name: parsed.data.name, path: canonicalPath, parent }));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") return reply.code(409).send(failure(request, "directory_exists", "同名文件或文件夹已经存在"));
+      return reply.code(400).send(failure(request, "create_directory_failed", error instanceof Error ? error.message : "无法创建文件夹"));
+    }
+  });
+
   daemon.get<{ Querystring: { path?: string } }>("/api/fs/content", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
     try {

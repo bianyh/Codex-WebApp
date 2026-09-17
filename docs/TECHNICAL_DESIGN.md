@@ -327,10 +327,10 @@ codex-console password change
 ### 7.5 本机权限
 
 - 使用普通 OS 用户运行 Daemon 和 Codex，禁止 root。
-- 文件浏览、上传、预览和新建目录使用 `CODEX_WORKSPACE_ROOT` 白名单；这些路径先 `realpath`，拒绝白名单外路径和符号链接逃逸。新线程工作目录与直接命令目录允许位于服务器任意位置，但仍须规范化为真实存在的目录，并受 daemon 所属 OS 用户权限限制。
+- 普通文件面板的浏览、上传、预览和目录操作使用 `CODEX_WORKSPACE_ROOT` 白名单；这些路径先 `realpath`，拒绝白名单外路径和符号链接逃逸。新线程目录选择器只列出目录，但允许浏览和新建 daemon 用户有权访问的任意服务器目录。新线程工作目录与直接命令目录仍须规范化为真实存在的目录，并受 daemon 所属 OS 用户权限限制。
 - 默认 Codex 沙箱为 `workspace-write`，默认审批策略为 `on-request`。
-- 新线程对话框包含独立的工作目录输入框，可填写 daemon 用户有权访问的任意已有服务器目录；绝对路径直接使用，相对路径按 `CODEX_CWD` 解析。旁边的目录浏览与新建目录能力仍受 `CODEX_WORKSPACE_ROOT` 约束。
-- UI 的直接命令接口启动 `CODEX_CONSOLE_SHELL -c`，不经过 Codex 审批，可执行 daemon 用户有权执行的任意命令。目录字段默认当前线程目录，也可选择任意存在的服务器目录；`CODEX_WORKSPACE_ROOT` 不参与该接口的目录校验，Shell 后续也可通过绝对路径或 `cd` 访问其他位置。单条命令限制为 10 分钟、1 MiB 输出，同时最多两条；中止操作终止整个命令进程组。文件浏览、上传、预览和新建目录仍使用工作区边界。
+- 新线程对话框使用一个目录选择器，可进入 daemon 用户有权读取的任意服务器目录并在当前位置新建文件夹；绝对路径直接使用，相对路径按 `CODEX_CWD` 解析。该选择器只返回目录，不提供文件内容读取能力。
+- UI 的直接命令接口启动 `CODEX_CONSOLE_SHELL -c`，不经过 Codex 审批，可执行 daemon 用户有权执行的任意命令。目录字段默认当前线程目录，也可选择任意存在的服务器目录；`CODEX_WORKSPACE_ROOT` 不参与该接口的目录校验，Shell 后续也可通过绝对路径或 `cd` 访问其他位置。单条命令限制为 10 分钟、1 MiB 输出，同时最多两条；中止操作终止整个命令进程组。普通文件面板的浏览、上传、预览及目录操作仍使用工作区边界。
 
 ## 8. 浏览器协议
 
@@ -355,6 +355,8 @@ PATCH /api/projects/:projectId
 GET  /api/fs/list?path=
 POST /api/fs/upload?path=&name=&mime=
 POST /api/fs/directories
+GET  /api/fs/server-directories?path=
+POST /api/fs/server-directories
 GET  /api/fs/content?path=
 GET  /api/fs/raw?path=
 POST /api/commands

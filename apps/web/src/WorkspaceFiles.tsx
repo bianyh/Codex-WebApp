@@ -399,7 +399,7 @@ export function DirectoryPicker({
     setError("");
     try {
       const value = await get<FsListing>(
-        `/api/fs/list?path=${encodeURIComponent(target ?? "")}`,
+        `/api/fs/server-directories?path=${encodeURIComponent(target ?? "")}`,
       );
       setListing(value);
       setManualPath(selectedPath ?? value.path);
@@ -418,7 +418,7 @@ export function DirectoryPicker({
     setCreatingFolder(true);
     setError("");
     try {
-      const created = await post<{ name: string; path: string }>("/api/fs/directories", {
+      const created = await post<{ name: string; path: string }>("/api/fs/server-directories", {
         parent: listing.path,
         name,
       });
@@ -507,7 +507,7 @@ export function DirectoryPicker({
             ))}
       </div>
       <div className="directory-picker-foot">
-        <span>工作区根目录：{listing?.root ?? "--"}</span>
+        <span>服务器根目录：{listing?.root ?? "--"}</span>
         <button
           className="primary-button"
           disabled={!manualPath}

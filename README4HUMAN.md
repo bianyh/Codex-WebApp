@@ -68,7 +68,7 @@ Configuration is supplied through environment variables:
 | `CODEX_CONSOLE_ORIGIN` | empty | When set, only the exact browser Origin is accepted. |
 | `CODEX_CONSOLE_DATA_DIR` | `~/.local/state/codex-console` | Password hash, session state, and uploaded attachments. |
 | `CODEX_CWD` | daemon startup directory | Default working directory for new threads and Codex. |
-| `CODEX_WORKSPACE_ROOT` | parent of `CODEX_CWD` | Boundary for project browsing and new directories. |
+| `CODEX_WORKSPACE_ROOT` | parent of `CODEX_CWD` | Boundary for the regular Files panel, uploads, previews, and its directory operations. |
 | `CODEX_COMMAND` | `codex` | Codex executable. Use an absolute path with version managers. |
 | `CODEX_CONSOLE_SHELL` | `$SHELL` or `/bin/bash` | Shell executable used by the direct command window. |
 | `CODEX_CONSOLE_SESSION_DAYS` | `7` | Session lifetime in days. |
@@ -84,7 +84,7 @@ CODEX_CONSOLE_PORT=8787 \
 npm run start
 ```
 
-The new-thread dialog accepts any existing server directory that the daemon's operating-system user can access. Absolute paths are used directly; relative paths are resolved from `CODEX_CWD`. Its directory browser remains inside `CODEX_WORKSPACE_ROOT`, as do the Files panel, uploads, previews, and new-directory operations. The Files panel can upload files directly to a permitted directory and copy each file's server-side absolute path. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
+The new-thread dialog's directory picker can navigate to any server directory that the daemon's operating-system user can read and can create a folder there. It lists directories only, accepts absolute paths directly, and resolves relative paths from `CODEX_CWD`. The regular Files panel, uploads, previews, and its directory operations remain inside `CODEX_WORKSPACE_ROOT`. The Files panel can upload files directly to a permitted directory and copy each file's server-side absolute path. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
 
 ### Custom models and providers
 
@@ -98,7 +98,7 @@ The right context sidebar includes a direct shell-command window. Its directory 
 
 This is a non-interactive shell rather than a PTY: programs that require terminal input, full-screen rendering, or password prompts may not work. Each command has a 10-minute timeout and a combined 1 MiB output limit, with at most two commands running concurrently. The UI can terminate the command's process group.
 
-`CODEX_WORKSPACE_ROOT` does not restrict this command window or the working directory entered when creating a thread. The daemon only canonicalizes those directories and verifies that they exist; once the shell starts, a command can use absolute paths or `cd` to access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to shell access to that account. The workspace browser, file uploads, previews, and new-directory UI remain restricted to `CODEX_WORKSPACE_ROOT`.
+`CODEX_WORKSPACE_ROOT` does not restrict this command window or the new-thread directory picker. The daemon canonicalizes those directories and verifies that they exist; once the shell starts, a command can use absolute paths or `cd` to access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to shell access to that account. The regular Files panel, file uploads, and previews remain restricted to `CODEX_WORKSPACE_ROOT`.
 
 ## Background Service on Linux
 

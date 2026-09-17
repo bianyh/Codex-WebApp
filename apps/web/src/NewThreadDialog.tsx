@@ -60,26 +60,11 @@ export function NewThreadDialog({
           </button>
         </header>
         <div className="new-thread-body">
-          <label className="thread-cwd-field">
-            <span>
-              <Folder size={14} />
-              线程工作目录
-            </span>
-            <input
-              value={cwd}
-              onChange={(event) => setCwd(event.target.value)}
-              placeholder="/absolute/path/to/project"
-              aria-label="线程工作目录"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-            />
-          </label>
           <label className="field-label">
             <Folder size={14} />
-            工作区目录浏览器
+            工作区目录
           </label>
-          <DirectoryPicker onSelect={setCwd} />
+          <DirectoryPicker initialPath={initialPath} onSelect={setCwd} />
           <div className="thread-settings-grid">
             <label>
               <span>模型（可选）</span>

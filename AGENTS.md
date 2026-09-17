@@ -18,7 +18,7 @@
 - 不硬编码密码、Token、Cookie、SSH 密钥、代理凭据或用户机器的敏感路径。
 - 不提交 `.env`、`state.json`、`apps/daemon/data`、上传附件、日志、构建产物和本机生成的 Codex 协议状态。
 - 不直接暴露 `codex app-server` 端口；需要手机访问时，优先使用 Tailscale/VPN 或 HTTPS 反向代理。
-- `CODEX_WORKSPACE_ROOT` 是文件浏览和新建目录的安全边界，任何路径处理都必须继续使用现有的规范化和越界检查。
+- `CODEX_WORKSPACE_ROOT` 是普通文件面板的浏览、上传、预览和新建目录安全边界。新线程目录选择器是明确例外：它可以只列出 daemon 用户可读取的任意服务器目录，并可在其中新建文件夹，但不能通过该选择器读取文件内容；路径仍须规范化并验证为实际目录。
 - 修改或重启 systemd 服务前，先检查当前服务状态和活动 Turn。活动 Turn 可能因 daemon/app-server 重启而中断；存在重要任务时必须等待空闲或让用户明确确认。
 - 不启用会隔离 `/proc/<pid>/fd` 的 `PrivateTmp` 或 `ProtectSystem`，否则外部 Codex Turn 识别会失效。
 
