@@ -30,7 +30,7 @@ official codex app-server -> local projects and tools
 
 - Responsive Codex-style conversation UI for phones, tablets, and desktops.
 - Password login with Argon2id password hashing and HttpOnly session cookies.
-- Create, resume, fork, archive, and switch between local project threads.
+- Create threads in any existing server directory, then resume, fork, archive, and switch between them.
 - Live Turn status, approval prompts, user-input requests, and external Codex activity detection.
 - Interrupt active Turns, send follow-up instructions while a Turn is running, and queue later instructions per thread.
 - Edit and resend the latest user message.

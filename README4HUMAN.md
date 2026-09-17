@@ -84,7 +84,7 @@ CODEX_CONSOLE_PORT=8787 \
 npm run start
 ```
 
-The workspace browser stays inside `CODEX_WORKSPACE_ROOT`. The Files panel can upload files directly to the current directory and copy each file's server-side absolute path. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
+The new-thread dialog accepts any existing server directory that the daemon's operating-system user can access. Absolute paths are used directly; relative paths are resolved from `CODEX_CWD`. Its directory browser remains inside `CODEX_WORKSPACE_ROOT`, as do the Files panel, uploads, previews, and new-directory operations. The Files panel can upload files directly to a permitted directory and copy each file's server-side absolute path. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
 
 ### Custom models and providers
 
@@ -98,7 +98,7 @@ The right context sidebar includes a direct shell-command window. Its directory 
 
 This is a non-interactive shell rather than a PTY: programs that require terminal input, full-screen rendering, or password prompts may not work. Each command has a 10-minute timeout and a combined 1 MiB output limit, with at most two commands running concurrently. The UI can terminate the command's process group.
 
-`CODEX_WORKSPACE_ROOT` does not restrict this command window. The daemon only canonicalizes the selected initial directory and verifies that it exists; once the shell starts, a command can use absolute paths or `cd` to access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to shell access to that account. The workspace browser, file uploads, and new-directory UI remain restricted to `CODEX_WORKSPACE_ROOT`.
+`CODEX_WORKSPACE_ROOT` does not restrict this command window or the working directory entered when creating a thread. The daemon only canonicalizes those directories and verifies that they exist; once the shell starts, a command can use absolute paths or `cd` to access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to shell access to that account. The workspace browser, file uploads, previews, and new-directory UI remain restricted to `CODEX_WORKSPACE_ROOT`.
 
 ## Background Service on Linux
 

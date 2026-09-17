@@ -16,6 +16,7 @@ import { CodexProcess, errorTextFromRaw, itemFromRaw } from "./codex.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import { ThreadActivityTracker, type ThreadActivity } from "./threadActivity.js";
 import { runWorkspaceCommand } from "./workspaceCommand.js";
+import { resolveServerDirectory } from "./serverDirectory.js";
 import type { ConsoleEvent, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
 
 const daemon = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
@@ -409,19 +410,6 @@ function isLocalPath(value: string): Promise<string> {
   });
 }
 
-/**
- * Direct shell commands intentionally have a wider scope than the workspace
- * browser. Resolve the initial working directory for the daemon user without
- * applying CODEX_WORKSPACE_ROOT; the shell itself runs with that user's normal
- * operating-system permissions.
- */
-async function resolveCommandPath(value: string): Promise<string> {
-  const candidate = path.isAbsolute(value) ? value : path.resolve(config.codexCwd, value);
-  const resolved = await realpath(candidate);
-  if (!(await stat(resolved)).isDirectory()) throw new Error("命令路径不是文件夹");
-  return resolved;
-}
-
 const textExtensions = new Set([".txt", ".md", ".mdx", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".csv", ".tsv", ".log", ".xml", ".html", ".css", ".scss", ".less", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".py", ".rs", ".go", ".java", ".kt", ".kts", ".c", ".h", ".cc", ".cpp", ".hpp", ".sh", ".bash", ".zsh", ".fish", ".sql", ".tex", ".bib", ".vue", ".svelte", ".env", ".gitignore"]);
 const mimeTypes: Record<string, string> = {
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".svg": "image/svg+xml", ".avif": "image/avif",
@@ -719,7 +707,7 @@ async function buildServer(): Promise<void> {
     const controller = new AbortController();
     runningCommands.set(commandId, controller);
     try {
-      const cwd = await resolveCommandPath(parsed.data.cwd);
+      const cwd = await resolveServerDirectory(parsed.data.cwd, config.codexCwd);
       const result = await runWorkspaceCommand({ command: parsed.data.command, cwd, shell: config.shellCommand, signal: controller.signal });
       return ok(request, { ...result, commandId });
     } catch (error) {
@@ -738,7 +726,33 @@ async function buildServer(): Promise<void> {
 
   daemon.get<{ Querystring: { cwd?: string } }>("/api/threads", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const threads = await codex.listThreads(request.query.cwd); const enriched = await Promise.all(threads.map(async (thread) => { knownThreads.set(thread.id, thread); const result = await activityTracker.enrich(thread); result.canRetry = !isTurnActiveStatus(result.status) && codex.controlsThread(result.id); knownThreads.set(result.id, result); return publicThread(result); })); return ok(request, enriched); } catch (error) { return reply.code(503).send(failure(request, "codex_unavailable", error instanceof Error ? error.message : "Codex 不可用", true)); } });
   daemon.get<{ Params: { threadId: string } }>("/api/threads/:threadId", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const snapshot = await codex.readThread(request.params.threadId); snapshot.thread = await activityTracker.enrich(snapshot.thread); if (!isTurnActiveStatus(snapshot.thread.status)) await codex.tryTakeControl(snapshot.thread.id); snapshot.thread.canRetry = !isTurnActiveStatus(snapshot.thread.status) && codex.controlsThread(snapshot.thread.id); knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot); return ok(request, publicSnapshot(snapshot)); } catch (error) { return reply.code(404).send(failure(request, "thread_not_found", error instanceof Error ? error.message : "线程不存在")); } });
-  daemon.post<{ Body: { cwd?: string; model?: string; sandbox?: string; approvalPolicy?: string } }>("/api/threads", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const body = request.body ?? {}; if (body.cwd) body.cwd = await isLocalPath(body.cwd); const snapshot = await codex.startThread(body); snapshot.thread.canRetry = true; knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot); return reply.code(201).send(ok(request, publicSnapshot(snapshot))); } catch (error) { return reply.code(503).send(failure(request, "codex_unavailable", error instanceof Error ? error.message : "无法创建线程", true)); } });
+  daemon.post<{ Body: { cwd?: string; model?: string; sandbox?: string; approvalPolicy?: string } }>("/api/threads", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.object({
+      cwd: z.string().trim().min(1).optional(),
+      model: z.string().optional(),
+      sandbox: z.string().optional(),
+      approvalPolicy: z.string().optional(),
+    }).safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_thread", "线程工作目录和设置必须有效"));
+    let cwd: string | undefined;
+    try {
+      cwd = parsed.data.cwd
+        ? await resolveServerDirectory(parsed.data.cwd, config.codexCwd)
+        : undefined;
+    } catch (error) {
+      return reply.code(400).send(failure(request, "invalid_path", error instanceof Error ? error.message : "线程工作目录无效"));
+    }
+    try {
+      const snapshot = await codex.startThread({ ...parsed.data, cwd });
+      snapshot.thread.canRetry = true;
+      knownThreads.set(snapshot.thread.id, snapshot.thread);
+      snapshots.set(snapshot.thread.id, snapshot);
+      return reply.code(201).send(ok(request, publicSnapshot(snapshot)));
+    } catch (error) {
+      return reply.code(503).send(failure(request, "codex_unavailable", error instanceof Error ? error.message : "无法创建线程", true));
+    }
+  });
   daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/resume", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const snapshot = await codex.resumeThread(request.params.threadId); snapshot.thread.canRetry = true; knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot); return ok(request, publicSnapshot(snapshot)); } catch (error) { return reply.code(503).send(failure(request, "resume_failed", error instanceof Error ? error.message : "无法恢复线程", true)); } });
   daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/archive", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { await codex.archiveThread(request.params.threadId); snapshots.delete(request.params.threadId); return ok(request, null); } catch (error) { return reply.code(503).send(failure(request, "archive_failed", error instanceof Error ? error.message : "无法归档线程", true)); } });
   daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/unarchive", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { await codex.unarchiveThread(request.params.threadId); return ok(request, null); } catch (error) { return reply.code(503).send(failure(request, "unarchive_failed", error instanceof Error ? error.message : "无法恢复线程", true)); } });

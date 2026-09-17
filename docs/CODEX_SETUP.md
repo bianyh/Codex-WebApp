@@ -75,8 +75,8 @@ CODEX_CONSOLE_DATA_DIR="$HOME/.local/state/codex-console" \
 
 根据用户意图设置：
 
-- `CODEX_CWD`：新线程默认工作目录，必须是实际存在的本机目录。
-- `CODEX_WORKSPACE_ROOT`：文件浏览、新建文件夹和项目选择的根目录，通常是包含多个项目的父目录；应尽量小。
+- `CODEX_CWD`：新线程默认工作目录和相对线程路径的解析基准，必须是实际存在的本机目录。新建线程时也可以直接输入 daemon 用户有权访问的任意已有目录。
+- `CODEX_WORKSPACE_ROOT`：文件浏览、新建文件夹和目录选择器的根目录，通常是包含多个项目的父目录；应尽量小。它不限制手动输入的新线程工作目录。
 - `CODEX_CONSOLE_HOST`：默认 `127.0.0.1`。手机访问时通常设为 `0.0.0.0`，但这会开放到所有网卡，必须配合局域网/VPN/HTTPS 安全措施。
 - `CODEX_CONSOLE_PORT`：默认 `8787`。端口冲突时先告诉用户并选择新端口，不要杀掉未知进程。
 - `CODEX_COMMAND`：Codex 不在 `PATH` 时填写绝对可执行文件路径。
