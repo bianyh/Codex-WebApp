@@ -18,7 +18,7 @@
 - 不硬编码密码、Token、Cookie、SSH 密钥、代理凭据或用户机器的敏感路径。
 - 不提交 `.env`、`state.json`、`apps/daemon/data`、上传附件、日志、构建产物和本机生成的 Codex 协议状态。
 - 不直接暴露 `codex app-server` 端口；需要手机访问时，优先使用 Tailscale/VPN 或 HTTPS 反向代理。
-- `CODEX_WORKSPACE_ROOT` 是普通文件面板的浏览、上传、预览和新建目录安全边界。新线程目录选择器是明确例外：它可以只列出 daemon 用户可读取的任意服务器目录，并可在其中新建文件夹，但不能通过该选择器读取文件内容；路径仍须规范化并验证为实际目录。
+- 文件面板、上传、预览、新建目录、新线程和命令窗口都可以访问 daemon 用户有权限访问的任意服务器路径，不设置应用层工作区边界。所有已有路径仍须通过 `realpath` 规范化并验证类型；新文件和新目录必须通过已规范化的父目录创建。
 - 修改或重启 systemd 服务前，先检查当前服务状态和活动 Turn。活动 Turn 可能因 daemon/app-server 重启而中断；存在重要任务时必须等待空闲或让用户明确确认。
 - 不启用会隔离 `/proc/<pid>/fd` 的 `PrivateTmp` 或 `ProtectSystem`，否则外部 Codex Turn 识别会失效。
 
@@ -38,7 +38,7 @@
 2. 检查是否已有 `codex-console.service` 或活动 Turn。
 3. 安装依赖、构建并运行测试。
 4. 让用户设置至少 12 个字符的登录密码；不要猜测或在输出中回显密码。
-5. 根据用户选择设置 `CODEX_CWD`、`CODEX_WORKSPACE_ROOT`、监听地址和端口。
+5. 根据用户选择设置 `CODEX_CWD`、监听地址和端口。
 6. 为 Linux 安装用户级 systemd 服务；将机器路径写入仓库之外的 `~/.config/codex-console/environment`，不要修改模板后提交个人绝对路径。
 7. 启动后检查 `/api/healthz`、服务日志和手机可访问地址。
 8. 最终只报告路径、地址、服务状态和验证结果，不报告密码、Cookie、Token 或 Codex 凭据。

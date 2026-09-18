@@ -14,7 +14,6 @@ Environment=CODEX_CONSOLE_REPO=%h/Codex-WebApp
 Environment=CODEX_CONSOLE_HOST=127.0.0.1
 Environment=CODEX_CONSOLE_PORT=8787
 Environment=CODEX_CONSOLE_DATA_DIR=%h/.local/state/codex-console
-Environment=CODEX_WORKSPACE_ROOT=%h
 Environment=CODEX_CWD=%h/Codex-WebApp
 Environment=CODEX_COMMAND=codex
 Environment=PATH=/usr/local/bin:/usr/bin:/bin

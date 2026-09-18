@@ -71,12 +71,11 @@ CODEX_CONSOLE_DATA_DIR="$HOME/.local/state/codex-console" \
 
 不要替用户生成、猜测、回显或记录密码，不要把密码作为命令行参数写进 shell 历史。更换密码使用 `password change`。
 
-## 5. 选择工作区和监听地址
+## 5. 选择默认目录和监听地址
 
 根据用户意图设置：
 
-- `CODEX_CWD`：新线程默认工作目录和相对线程路径的解析基准，必须是实际存在的本机目录。新线程目录选择器可以进入 daemon 用户有权读取的任意目录。
-- `CODEX_WORKSPACE_ROOT`：普通文件面板、上传、预览及其目录操作的根目录，通常是包含多个项目的父目录；应尽量小。它不限制新线程目录选择器。
+- `CODEX_CWD`：新线程、Files 面板的默认目录和所有相对路径的解析基准，必须是实际存在的本机目录。目录选择器和 Files 面板可以进入 daemon 用户有权限访问的任意路径。
 - `CODEX_CONSOLE_HOST`：默认 `127.0.0.1`。手机访问时通常设为 `0.0.0.0`，但这会开放到所有网卡，必须配合局域网/VPN/HTTPS 安全措施。
 - `CODEX_CONSOLE_PORT`：默认 `8787`。端口冲突时先告诉用户并选择新端口，不要杀掉未知进程。
 - `CODEX_COMMAND`：Codex 不在 `PATH` 时填写绝对可执行文件路径。
@@ -87,7 +86,6 @@ CODEX_CONSOLE_DATA_DIR="$HOME/.local/state/codex-console" \
 
 ```bash
 CODEX_CWD=/path/to/default-project \
-CODEX_WORKSPACE_ROOT=/path/to/projects \
 CODEX_CONSOLE_HOST=0.0.0.0 \
 CODEX_CONSOLE_PORT=8787 \
 CODEX_COMMAND=codex \
@@ -106,7 +104,7 @@ ${EDITOR:-vi} "$HOME/.config/codex-console/environment"
 chmod 600 "$HOME/.config/codex-console/environment"
 ```
 
-至少设置实际的 `CODEX_CONSOLE_REPO`、`CODEX_NODE`、`CODEX_CWD`、`CODEX_WORKSPACE_ROOT` 和 `CODEX_COMMAND`；手机访问时设置 `CODEX_CONSOLE_HOST=0.0.0.0`。`CODEX_NODE` 和 `CODEX_COMMAND` 在使用 Volta、nvm 或其他版本管理器时应填写绝对路径。
+至少设置实际的 `CODEX_CONSOLE_REPO`、`CODEX_NODE`、`CODEX_CWD` 和 `CODEX_COMMAND`；手机访问时设置 `CODEX_CONSOLE_HOST=0.0.0.0`。`CODEX_NODE` 和 `CODEX_COMMAND` 在使用 Volta、nvm 或其他版本管理器时应填写绝对路径。
 
 ```bash
 mkdir -p "$HOME/.config/systemd/user"
@@ -178,5 +176,4 @@ systemctl --user restart codex-console.service
 - 端口已被其他进程占用；
 - 当前存在重要或不明确的活动 Turn；
 - 需要开放防火墙、绑定公网地址、配置域名或申请 TLS 证书；
-- 需要更改 `CODEX_WORKSPACE_ROOT` 到用户目录之外；
 - 需要删除状态、上传文件、日志或其他用户数据。

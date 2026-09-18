@@ -9,7 +9,6 @@ export const config = {
   codexCommand: process.env.CODEX_COMMAND ?? "codex",
   shellCommand: process.env.CODEX_CONSOLE_SHELL ?? process.env.SHELL ?? "/bin/bash",
   codexCwd: process.env.CODEX_CWD ?? process.cwd(),
-  workspaceRoot: path.resolve(process.env.CODEX_WORKSPACE_ROOT ?? path.dirname(process.cwd())),
   sessionDays: Number(process.env.CODEX_CONSOLE_SESSION_DAYS ?? 7),
 };
 

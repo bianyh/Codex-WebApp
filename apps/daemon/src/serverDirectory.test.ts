@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { resolveServerDirectory } from "./serverDirectory.js";
+import { resolveServerDirectory, resolveServerPath } from "./serverDirectory.js";
 
 describe("server directories", () => {
   it("accepts an absolute directory outside the configured workspace", async () => {
@@ -22,5 +22,13 @@ describe("server directories", () => {
     await writeFile(filename, "content");
     await expect(resolveServerDirectory(filename, directory)).rejects.toThrow("路径不是文件夹");
     await expect(resolveServerDirectory("missing", directory)).rejects.toThrow();
+  });
+
+  it("resolves files anywhere the daemon user can access", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "codex-console-path-"));
+    const filename = path.join(directory, "file.txt");
+    await writeFile(filename, "content");
+    await expect(resolveServerPath(filename, "/unused/base")).resolves.toBe(filename);
+    await expect(resolveServerPath("file.txt", directory)).resolves.toBe(filename);
   });
 });

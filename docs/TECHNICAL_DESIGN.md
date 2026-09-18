@@ -327,10 +327,10 @@ codex-console password change
 ### 7.5 本机权限
 
 - 使用普通 OS 用户运行 Daemon 和 Codex，禁止 root。
-- 普通文件面板的浏览、上传、预览和目录操作使用 `CODEX_WORKSPACE_ROOT` 白名单；这些路径先 `realpath`，拒绝白名单外路径和符号链接逃逸。新线程目录选择器只列出目录，但允许浏览和新建 daemon 用户有权访问的任意服务器目录。新线程工作目录与直接命令目录仍须规范化为真实存在的目录，并受 daemon 所属 OS 用户权限限制。
+- 文件面板、上传、预览、目录操作、新线程和直接命令均允许访问 daemon 用户有权限访问的任意服务器路径，不设置应用层工作区白名单。已有路径先通过 `realpath` 规范化并验证类型；新文件和新目录只能在已规范化的父目录下创建。
 - 默认 Codex 沙箱为 `workspace-write`，默认审批策略为 `on-request`。
-- 新线程对话框使用一个目录选择器，可进入 daemon 用户有权读取的任意服务器目录并在当前位置新建文件夹；绝对路径直接使用，相对路径按 `CODEX_CWD` 解析。该选择器只返回目录，不提供文件内容读取能力。
-- UI 的直接命令接口启动 `CODEX_CONSOLE_SHELL -c`，不经过 Codex 审批，可执行 daemon 用户有权执行的任意命令。目录字段默认当前线程目录，也可选择任意存在的服务器目录；`CODEX_WORKSPACE_ROOT` 不参与该接口的目录校验，Shell 后续也可通过绝对路径或 `cd` 访问其他位置。单条命令限制为 10 分钟、1 MiB 输出，同时最多两条；中止操作终止整个命令进程组。普通文件面板的浏览、上传、预览及目录操作仍使用工作区边界。
+- 新线程对话框使用一个目录选择器，可进入 daemon 用户有权读取的任意服务器目录并在当前位置新建文件夹；绝对路径直接使用，相对路径按 `CODEX_CWD` 解析。
+- UI 的直接命令接口启动 `CODEX_CONSOLE_SHELL -c`，不经过 Codex 审批，可执行 daemon 用户有权执行的任意命令。目录字段默认当前线程目录，也可选择任意存在的服务器目录；Shell 后续可通过绝对路径或 `cd` 访问其他位置。单条命令限制为 10 分钟、1 MiB 输出，同时最多两条；中止操作终止整个命令进程组。
 
 ## 8. 浏览器协议
 
@@ -576,15 +576,14 @@ ExecStart=/usr/local/bin/codex-console start
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ReadWritePaths=%h/.codex %h/.local/share/codex-console
+# 不启用 PrivateTmp 或 ProtectSystem；外部 Turn 识别需要读取 /proc/<pid>/fd，
+# Files 和命令窗口也按 daemon 用户自身权限访问服务器文件系统。
 
 [Install]
 WantedBy=default.target
 ```
 
-`ReadWritePaths` 必须按实际项目目录调整；systemd 防护选项不能替代项目白名单。
+使用专用普通用户运行服务，不要使用 root。应用的文件访问范围等同于该用户的操作系统权限。
 
 ### 12.3 手机访问
 
@@ -639,7 +638,7 @@ WantedBy=default.target
 - 协议事件到领域事件的映射。
 - EventBus 环形缓冲和重放边界。
 - reducer 对重复、乱序和重连事件的处理。
-- 项目路径白名单和符号链接逃逸检查。
+- 任意服务器路径的规范化、文件类型检查和权限错误处理。
 - Argon2id 密码校验、会话撤销、过期和速率限制。
 
 ### 14.2 集成测试
@@ -686,7 +685,7 @@ Codex version | schema generation | initialize | thread | turn | approvals | dif
 
 - HTTP、密码登录、Session Cookie。
 - WebSocket 鉴权和事件广播。
-- 项目白名单、线程列表、线程读取、发送/中断 Turn。
+- 服务器路径规范化、线程列表、线程读取、发送/中断 Turn。
 - systemd/本机启动脚本。
 
 验收：同一局域网浏览器可登录并完成一次 Codex 任务。
@@ -743,7 +742,7 @@ Codex version | schema generation | initialize | thread | turn | approvals | dif
 - [ ] 实现 `initialize`、`thread/list`、`thread/read`、`thread/start`、`thread/resume`、`turn/start`、`turn/interrupt`。
 - [ ] 实现 EventBus、事件 ID、环形缓冲和 resync。
 - [ ] 实现 Argon2id 密码初始化、登录、HttpOnly Session Cookie、登出。
-- [ ] 实现项目白名单和 `realpath` 路径校验。
+- [ ] 实现服务器路径 `realpath` 规范化和类型校验。
 - [ ] 实现浏览器 WebSocket DTO、Origin 校验和请求频控。
 - [ ] 实现桌面三栏/手机单列布局骨架。
 - [ ] 实现消息、命令、文件、Plan、审批等时间线卡片。

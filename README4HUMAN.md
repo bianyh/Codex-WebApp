@@ -68,7 +68,6 @@ Configuration is supplied through environment variables:
 | `CODEX_CONSOLE_ORIGIN` | empty | When set, only the exact browser Origin is accepted. |
 | `CODEX_CONSOLE_DATA_DIR` | `~/.local/state/codex-console` | Password hash, session state, and uploaded attachments. |
 | `CODEX_CWD` | daemon startup directory | Default working directory for new threads and Codex. |
-| `CODEX_WORKSPACE_ROOT` | parent of `CODEX_CWD` | Boundary for the regular Files panel, uploads, previews, and its directory operations. |
 | `CODEX_COMMAND` | `codex` | Codex executable. Use an absolute path with version managers. |
 | `CODEX_CONSOLE_SHELL` | `$SHELL` or `/bin/bash` | Shell executable used by the direct command window. |
 | `CODEX_CONSOLE_SESSION_DAYS` | `7` | Session lifetime in days. |
@@ -78,13 +77,12 @@ Example:
 
 ```bash
 CODEX_CWD=/srv/projects/demo \
-CODEX_WORKSPACE_ROOT=/srv/projects \
 CODEX_CONSOLE_HOST=0.0.0.0 \
 CODEX_CONSOLE_PORT=8787 \
 npm run start
 ```
 
-The new-thread dialog's directory picker can navigate to any server directory that the daemon's operating-system user can read and can create a folder there. It lists directories only, accepts absolute paths directly, and resolves relative paths from `CODEX_CWD`. The regular Files panel, uploads, previews, and its directory operations remain inside `CODEX_WORKSPACE_ROOT`. The Files panel can upload files directly to a permitted directory and copy each file's server-side absolute path. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
+The new-thread dialog and Files panel can navigate to any server path available to the daemon's operating-system user. Absolute paths are used directly, and relative paths are resolved from `CODEX_CWD`. The Files panel can upload files, create directories, preview or download files, and copy server-side absolute paths anywhere that user has permission. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
 
 ### Custom models and providers
 
@@ -98,7 +96,7 @@ The right context sidebar includes a direct shell-command window. Its directory 
 
 This is a non-interactive shell rather than a PTY: programs that require terminal input, full-screen rendering, or password prompts may not work. Each command has a 10-minute timeout and a combined 1 MiB output limit, with at most two commands running concurrently. The UI can terminate the command's process group.
 
-`CODEX_WORKSPACE_ROOT` does not restrict this command window or the new-thread directory picker. The daemon canonicalizes those directories and verifies that they exist; once the shell starts, a command can use absolute paths or `cd` to access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to shell access to that account. The regular Files panel, file uploads, and previews remain restricted to `CODEX_WORKSPACE_ROOT`.
+The daemon canonicalizes selected paths and verifies their type, but it does not enforce an application-level workspace boundary. The command window and Files panel can access anything permitted to the daemon's OS user. Treat access to Codex WebApp as equivalent to filesystem and shell access to that account.
 
 ## Background Service on Linux
 
@@ -110,7 +108,7 @@ ${EDITOR:-vi} ~/.config/codex-console/environment
 chmod 600 ~/.config/codex-console/environment
 ```
 
-At minimum, set `CODEX_CONSOLE_REPO`, `CODEX_NODE`, `CODEX_CWD`, `CODEX_WORKSPACE_ROOT`, and `CODEX_COMMAND` to values valid on the machine. Set `CODEX_CONSOLE_HOST=0.0.0.0` only when phone access is needed.
+At minimum, set `CODEX_CONSOLE_REPO`, `CODEX_NODE`, `CODEX_CWD`, and `CODEX_COMMAND` to values valid on the machine. Set `CODEX_CONSOLE_HOST=0.0.0.0` only when phone access is needed.
 
 Install and start the service:
 
@@ -146,7 +144,7 @@ The external Turn detector reads rollout links through `/proc/<pid>/fd` for the 
 - Do not expose port `8787` directly to the public Internet. Prefer Tailscale/VPN or an HTTPS reverse proxy.
 - Plain LAN HTTP is not encrypted. Use HTTPS for anything beyond a trusted private network.
 - Never commit `.env`, state files, uploaded attachments, cookies, tokens, SSH keys, or Codex credentials.
-- Keep `CODEX_WORKSPACE_ROOT` as narrow as practical.
+- Filesystem operations and direct commands can access every path permitted to the daemon's OS user. Use a dedicated non-root account, a strong unique password, and a trusted VPN or HTTPS endpoint.
 - The authenticated command window can execute arbitrary shell commands as the daemon's OS user without Codex approval. Do not expose the service directly to the public Internet, use a strong unique password, and protect it with a VPN/Tailscale or HTTPS.
 - Keep the app-server on stdio; do not configure a public app-server listener.
 

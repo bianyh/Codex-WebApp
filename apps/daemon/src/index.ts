@@ -16,7 +16,7 @@ import { CodexProcess, errorTextFromRaw, itemFromRaw } from "./codex.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import { ThreadActivityTracker, type ThreadActivity } from "./threadActivity.js";
 import { runWorkspaceCommand } from "./workspaceCommand.js";
-import { resolveServerDirectory } from "./serverDirectory.js";
+import { resolveServerDirectory, resolveServerPath } from "./serverDirectory.js";
 import type { ConsoleEvent, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
 
 const daemon = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
@@ -401,15 +401,6 @@ function scheduleThreadActivityRefresh(): void {
   });
 }
 
-function isLocalPath(value: string): Promise<string> {
-  const candidate = path.isAbsolute(value) ? value : path.join(config.workspaceRoot, value);
-  return realpath(candidate).then((resolved) => {
-    const root = config.workspaceRoot;
-    if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw new Error(`路径必须位于工作区 ${root} 内`);
-    return resolved;
-  });
-}
-
 const textExtensions = new Set([".txt", ".md", ".mdx", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".csv", ".tsv", ".log", ".xml", ".html", ".css", ".scss", ".less", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".py", ".rs", ".go", ".java", ".kt", ".kts", ".c", ".h", ".cc", ".cpp", ".hpp", ".sh", ".bash", ".zsh", ".fish", ".sql", ".tex", ".bib", ".vue", ".svelte", ".env", ".gitignore"]);
 const mimeTypes: Record<string, string> = {
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".svg": "image/svg+xml", ".avif": "image/avif",
@@ -574,19 +565,16 @@ async function buildServer(): Promise<void> {
       return reply.code(400).send(failure(request, "invalid_upload_name", "文件名不能包含路径分隔符或控制字符"));
     }
     try {
-      const directory = await isLocalPath(request.query.path || config.workspaceRoot);
-      const directoryStat = await stat(directory);
-      if (!directoryStat.isDirectory()) {
-        return reply.code(400).send(failure(request, "not_directory", "上传目标不是文件夹"));
-      }
+      const directory = await resolveServerDirectory(request.query.path || config.codexCwd, config.codexCwd);
       const storedPath = path.join(directory, name);
       await writeFile(storedPath, body, { mode: 0o600, flag: "wx" });
-      const metadata = await stat(storedPath);
+      const canonicalPath = await resolveServerPath(storedPath, directory);
+      const metadata = await stat(canonicalPath);
       return reply.code(201).send(ok(request, {
         name,
-        path: storedPath,
+        path: canonicalPath,
         type: "file",
-        kind: fileKind(storedPath),
+        kind: fileKind(canonicalPath),
         size: metadata.size,
         modifiedAt: metadata.mtime.toISOString(),
         hidden: name.startsWith("."),
@@ -604,7 +592,7 @@ async function buildServer(): Promise<void> {
     const parsed = z.object({ name: z.string().min(1).max(80), path: z.string().min(1) }).safeParse(request.body);
     if (!parsed.success) return reply.code(400).send(failure(request, "invalid_input", "项目名称和路径不能为空"));
     try {
-      const canonicalPath = await isLocalPath(parsed.data.path);
+      const canonicalPath = await resolveServerDirectory(parsed.data.path, config.codexCwd);
       const project = { id: crypto.randomUUID(), name: parsed.data.name, canonicalPath, enabled: true };
       getState().projects.push(project); await persistState(); return reply.code(201).send(ok(request, project));
     } catch (error) { return reply.code(400).send(failure(request, "invalid_path", error instanceof Error ? error.message : "项目路径无效")); }
@@ -613,20 +601,19 @@ async function buildServer(): Promise<void> {
   daemon.get<{ Querystring: { path?: string } }>("/api/fs/list", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
     try {
-      const directory = await isLocalPath(request.query.path || config.workspaceRoot);
-      const directoryStat = await stat(directory);
-      if (!directoryStat.isDirectory()) return reply.code(400).send(failure(request, "not_directory", "所选路径不是文件夹"));
+      const directory = await resolveServerDirectory(request.query.path || config.codexCwd, config.codexCwd);
       const dirents = await readdir(directory, { withFileTypes: true });
       const entries = await Promise.all(dirents.slice(0, 1000).map(async (entry) => {
         const entryPath = path.join(directory, entry.name);
         try {
-          const resolved = await isLocalPath(entryPath);
+          const resolved = await resolveServerPath(entryPath, directory);
           const metadata = await stat(resolved);
           return { name: entry.name, path: resolved, type: metadata.isDirectory() ? "directory" : "file", kind: metadata.isDirectory() ? "directory" : fileKind(resolved), size: metadata.size, modifiedAt: metadata.mtime.toISOString(), hidden: entry.name.startsWith(".") };
         } catch { return null; }
       }));
       const visible = entries.filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)).sort((left, right) => left.type === right.type ? left.name.localeCompare(right.name) : left.type === "directory" ? -1 : 1);
-      return ok(request, { path: directory, root: config.workspaceRoot, parent: directory === config.workspaceRoot ? null : path.dirname(directory), entries: visible, truncated: dirents.length > 1000 });
+      const root = path.parse(directory).root;
+      return ok(request, { path: directory, root, parent: directory === root ? null : path.dirname(directory), entries: visible, truncated: dirents.length > 1000 });
     } catch (error) { return reply.code(400).send(failure(request, "invalid_path", error instanceof Error ? error.message : "无法读取目录")); }
   });
 
@@ -641,11 +628,10 @@ async function buildServer(): Promise<void> {
     }).safeParse(request.body);
     if (!parsed.success) return reply.code(400).send(failure(request, "invalid_directory_name", parsed.error.issues[0]?.message ?? "文件夹名称无效"));
     try {
-      const parent = await isLocalPath(parsed.data.parent);
-      if (!(await stat(parent)).isDirectory()) return reply.code(400).send(failure(request, "not_directory", "父路径不是文件夹"));
+      const parent = await resolveServerDirectory(parsed.data.parent, config.codexCwd);
       const directory = path.join(parent, parsed.data.name);
       await mkdir(directory, { mode: 0o700 });
-      const canonicalPath = await isLocalPath(directory);
+      const canonicalPath = await resolveServerDirectory(directory, config.codexCwd);
       return reply.code(201).send(ok(request, { name: parsed.data.name, path: canonicalPath, parent }));
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -719,7 +705,7 @@ async function buildServer(): Promise<void> {
     if (!(await requireAuth(request, reply))) return;
     try {
       if (!request.query.path) return reply.code(400).send(failure(request, "missing_path", "缺少文件路径"));
-      const filePath = await isLocalPath(request.query.path);
+      const filePath = await resolveServerPath(request.query.path, config.codexCwd);
       const metadata = await stat(filePath);
       if (!metadata.isFile()) return reply.code(400).send(failure(request, "not_file", "所选路径不是文件"));
       const kind = fileKind(filePath);
@@ -734,7 +720,7 @@ async function buildServer(): Promise<void> {
     if (!(await requireAuth(request, reply))) return;
     try {
       if (!request.query.path) return reply.code(400).send(failure(request, "missing_path", "缺少文件路径"));
-      const filePath = await isLocalPath(request.query.path);
+      const filePath = await resolveServerPath(request.query.path, config.codexCwd);
       const metadata = await stat(filePath);
       if (!metadata.isFile()) return reply.code(400).send(failure(request, "not_file", "所选路径不是文件"));
       const contentType = mimeTypes[path.extname(filePath).toLowerCase()] ?? "application/octet-stream";
