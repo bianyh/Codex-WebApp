@@ -41,6 +41,7 @@ export type ThreadSummary = {
 export type TimelineItem = {
   id: string;
   kind: "user" | "agent" | "reasoning" | "command" | "file_change" | "plan" | "mcp" | "system" | "unknown";
+  createdAt?: string;
   text?: string;
   title?: string;
   status?: string;

@@ -72,6 +72,7 @@ import { FilePreview, WorkspaceFiles, fileEntryFromPath, type FsEntry } from "./
 import { resolveLocalFileHref } from "./fileLinks";
 import { normalizeMarkdownMath } from "./markdown";
 import { createOptimisticUserItem, mergeTimelineItem, textFromRawItem } from "./messageState";
+import { formatMessageTimestamp } from "./messageTime";
 import { NewThreadDialog } from "./NewThreadDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { CommandPanel } from "./CommandPanel";
@@ -291,6 +292,10 @@ function isTurnActiveStatus(status: Thread["status"] | undefined): boolean {
   return status === "running" || status === "waiting_approval" || status === "waiting_input";
 }
 
+function itemTimestamp(item: Item): string {
+  return formatMessageTimestamp(item.createdAt);
+}
+
 function ThreadDrawer({
   threads,
   selected,
@@ -389,7 +394,7 @@ const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false,
         <div className="avatar user-avatar">你</div>
         <div className="message-body">
           <div className="message-meta">
-            你 <span>刚刚</span>
+            你 <span>{itemTimestamp(item)}</span>
             {isLastUser && (
               <button className="message-edit-button" disabled={!editable} onClick={() => onEdit?.(item)} title={editable ? "编辑并重新发送最近消息" : editUnavailableReason} aria-label="编辑并重新发送最近消息">
                 <PencilLine size={14} />
@@ -411,7 +416,7 @@ const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false,
         <div className="message-body">
           <div className="message-meta">
             Codex{" "}
-            <span>{isFinalAgentMessage(item) ? "最终回复" : item.status === "inProgress" ? "正在生成" : "执行过程"}</span>
+            <span>{itemTimestamp(item)} · {isFinalAgentMessage(item) ? "最终回复" : item.status === "inProgress" ? "正在生成" : "执行过程"}</span>
           </div>
           <div className="prose">
             <MessageMarkdown text={item.text ?? ""} cwd={cwd} onOpenFile={onOpenFile} />
@@ -906,7 +911,7 @@ function App() {
       const existing = current.items.some((item) => item.kind === "system" && item.text === message);
       const items = existing
         ? current.items
-        : [...current.items, { id: `codex-error-${turnId ?? crypto.randomUUID()}`, kind: "system" as const, title: "Codex 错误", text: message, status: "failed" }];
+        : [...current.items, { id: `codex-error-${turnId ?? crypto.randomUUID()}`, kind: "system" as const, createdAt: new Date().toISOString(), title: "Codex 错误", text: message, status: "failed" }];
       const thread = markFailed
         ? { ...current.thread, status: "failed" as const, activeTurnId: undefined, canInterrupt: false, activitySource: undefined }
         : current.thread;
@@ -1126,6 +1131,7 @@ function App() {
   }, [authenticated, selected, subscribe, appendTimelineError]);
   const applyEvent = (event: TimelineEvent) => {
     const params = event.params ?? {};
+    const eventCreatedAt = event.receivedAt ?? new Date().toISOString();
     const turnObject =
       params.turn && typeof params.turn === "object"
         ? (params.turn as Record<string, unknown>)
@@ -1185,6 +1191,7 @@ function App() {
           items.push({
             id: itemId,
             kind: "agent",
+            createdAt: eventCreatedAt,
             text: String(params.delta ?? params.text ?? ""),
           });
       } else if (
@@ -1201,13 +1208,14 @@ function App() {
           items.push({
             id: itemId,
             kind: "reasoning",
+            createdAt: eventCreatedAt,
             title: "Reasoning",
             text: String(params.delta ?? params.text ?? ""),
           });
       } else if (event.method === "item/plan/delta") {
         const index = items.findIndex((item) => item.id === itemId);
         if (index >= 0) items[index] = { ...items[index], text: `${items[index].text ?? ""}${String(params.delta ?? "")}` };
-        else items.push({ id: itemId, kind: "plan", title: "Plan", status: "inProgress", text: String(params.delta ?? "") });
+        else items.push({ id: itemId, kind: "plan", createdAt: eventCreatedAt, title: "Plan", status: "inProgress", text: String(params.delta ?? "") });
       } else if (event.method === "item/commandExecution/outputDelta" || event.method === "command/exec/outputDelta") {
         const index = items.findIndex((item) => item.id === itemId);
         if (index >= 0)
@@ -1219,6 +1227,7 @@ function App() {
           items.push({
             id: itemId,
             kind: "command",
+            createdAt: eventCreatedAt,
             title: "Command",
             status: "inProgress",
             output: String(params.delta ?? params.output ?? ""),
@@ -1234,6 +1243,7 @@ function App() {
           items.push({
             id: itemId,
             kind: "file_change",
+            createdAt: eventCreatedAt,
             title: "File change",
             status: "inProgress",
             diff: String(params.delta ?? ""),
@@ -1256,6 +1266,7 @@ function App() {
           : "";
         const mapped: Item = {
           id: String(raw.id ?? itemId),
+          createdAt: eventCreatedAt,
           kind: rawType === "agentMessage"
             ? "agent"
             : rawType === "reasoning"

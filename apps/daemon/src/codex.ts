@@ -99,21 +99,35 @@ function summaryFromRaw(raw: unknown): ThreadSummary {
   };
 }
 
-function itemFromRaw(raw: unknown): TimelineItem {
+function timestampToIso(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+  if (typeof value === "string") {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+  return undefined;
+}
+
+function itemFromRaw(raw: unknown, fallbackCreatedAt?: string): TimelineItem {
   const value = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const type = String(value.type ?? "unknown");
   const id = String(value.id ?? randomUUID());
-  if (type === "userMessage") return { id, kind: "user", text: textFromContent(value.content) };
-  if (type === "agentMessage") return { id, kind: "agent", text: typeof value.text === "string" ? value.text : textFromContent(value.content), status: typeof value.phase === "string" ? value.phase : undefined };
-  if (type === "reasoning") return { id, kind: "reasoning", text: typeof value.text === "string" ? value.text : textFromContent(value.summary) || textFromContent(value.content), title: "Reasoning" };
-  if (type === "commandExecution" || type === "command_execution") return { id, kind: "command", command: typeof value.command === "string" ? value.command : undefined, output: typeof value.aggregatedOutput === "string" ? value.aggregatedOutput : typeof value.output === "string" ? value.output : undefined, status: typeof value.status === "string" ? value.status : undefined, title: "Command" };
+  const createdAt = timestampToIso(value.createdAt ?? value.timestamp) ?? fallbackCreatedAt;
+  if (type === "userMessage") return { id, kind: "user", createdAt, text: textFromContent(value.content) };
+  if (type === "agentMessage") return { id, kind: "agent", createdAt, text: typeof value.text === "string" ? value.text : textFromContent(value.content), status: typeof value.phase === "string" ? value.phase : undefined };
+  if (type === "reasoning") return { id, kind: "reasoning", createdAt, text: typeof value.text === "string" ? value.text : textFromContent(value.summary) || textFromContent(value.content), title: "Reasoning" };
+  if (type === "commandExecution" || type === "command_execution") return { id, kind: "command", createdAt, command: typeof value.command === "string" ? value.command : undefined, output: typeof value.aggregatedOutput === "string" ? value.aggregatedOutput : typeof value.output === "string" ? value.output : undefined, status: typeof value.status === "string" ? value.status : undefined, title: "Command" };
   if (type === "fileChange" || type === "file_change") {
     const changes = Array.isArray(value.changes) ? value.changes.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object") : [];
-    return { id, kind: "file_change", path: typeof value.path === "string" ? value.path : typeof changes[0]?.path === "string" ? changes[0].path : undefined, diff: typeof value.diff === "string" ? value.diff : changes.map((change) => typeof change.diff === "string" ? change.diff : "").filter(Boolean).join("\n"), status: typeof value.status === "string" ? value.status : undefined, title: changes.length === 1 ? "File change" : `${changes.length} file changes`, metadata: { changes } };
+    return { id, kind: "file_change", createdAt, path: typeof value.path === "string" ? value.path : typeof changes[0]?.path === "string" ? changes[0].path : undefined, diff: typeof value.diff === "string" ? value.diff : changes.map((change) => typeof change.diff === "string" ? change.diff : "").filter(Boolean).join("\n"), status: typeof value.status === "string" ? value.status : undefined, title: changes.length === 1 ? "File change" : `${changes.length} file changes`, metadata: { changes } };
   }
-  if (type === "plan") return { id, kind: "plan", text: typeof value.text === "string" ? value.text : textFromContent(value.content), title: "Plan" };
-  if (type.toLowerCase().includes("mcp")) return { id, kind: "mcp", title: typeof value.name === "string" ? value.name : "MCP tool", text: typeof value.result === "string" ? value.result : undefined, status: typeof value.status === "string" ? value.status : undefined };
-  return { id, kind: "unknown", title: type, metadata: value };
+  if (type === "plan") return { id, kind: "plan", createdAt, text: typeof value.text === "string" ? value.text : textFromContent(value.content), title: "Plan" };
+  if (type.toLowerCase().includes("mcp")) return { id, kind: "mcp", createdAt, title: typeof value.name === "string" ? value.name : "MCP tool", text: typeof value.result === "string" ? value.result : undefined, status: typeof value.status === "string" ? value.status : undefined };
+  return { id, kind: "unknown", createdAt, title: type, metadata: value };
 }
 
 export class CodexProcess {
@@ -289,10 +303,12 @@ export class CodexProcess {
   async readThread(threadId: string): Promise<ThreadSnapshot> {
     const result = await this.request("thread/read", { threadId, includeTurns: true });
     const raw = (result && typeof result === "object" ? (result as Record<string, unknown>).thread : {}) as Record<string, unknown>;
+    const summary = summaryFromRaw(raw);
     const turns = Array.isArray(raw.turns) ? raw.turns : [];
     const items = turns.flatMap((turn) => {
       const t = (turn && typeof turn === "object" ? turn : {}) as Record<string, unknown>;
-      const mapped = Array.isArray(t.items) ? t.items.map(itemFromRaw) : [];
+      const turnStartedAt = timestampToIso(t.startedAt) ?? summary.updatedAt;
+      const mapped = Array.isArray(t.items) ? t.items.map((item) => itemFromRaw(item, turnStartedAt)) : [];
       // Some older providers omit MessagePhase. The last assistant message
       // in a completed turn is still the user-visible final reply; mark it so
       // the UI can separate it from progress narration.
@@ -303,6 +319,7 @@ export class CodexProcess {
         mapped.push({
           id: `codex-error-${String(t.id ?? randomUUID())}`,
           kind: "system",
+          createdAt: turnStartedAt,
           title: "Codex 错误",
           text: errorTextFromRaw(t.error),
           status: "failed",
@@ -310,7 +327,7 @@ export class CodexProcess {
       }
       return mapped;
     });
-    return { thread: summaryFromRaw(raw), items, pendingRequests: [], changedFiles: [], plan: [], diff: "" };
+    return { thread: summary, items, pendingRequests: [], changedFiles: [], plan: [], diff: "" };
   }
 
   async startThread(input: { cwd?: string; model?: string; sandbox?: string; approvalPolicy?: string }): Promise<ThreadSnapshot> {

@@ -11,7 +11,7 @@ describe("optimistic user messages", () => {
   it("replaces the temporary item when the canonical user event arrives", () => {
     const local = createOptimisticUserItem("run tests");
     const canonical = { id: "server-user-1", kind: "user" as const, text: "run tests" };
-    expect(mergeTimelineItem([local], canonical)).toEqual([canonical]);
+    expect(mergeTimelineItem([local], canonical)).toEqual([{ ...canonical, createdAt: local.createdAt }]);
   });
 
   it("extracts user text from app-server content blocks", () => {
@@ -26,6 +26,7 @@ describe("optimistic user messages", () => {
     const canonical = { id: "server-user-attachment", kind: "user" as const };
     expect(mergeTimelineItem([local], canonical)).toEqual([{
       ...canonical,
+      createdAt: local.createdAt,
       text: "附件：image.png",
     }]);
   });

@@ -16,6 +16,7 @@ export function createOptimisticUserItem(text: string, attachmentNames: string[]
   return {
     id: optimisticUserId(),
     kind: "user",
+    createdAt: new Date().toISOString(),
     text: text || attachmentText,
   };
 }

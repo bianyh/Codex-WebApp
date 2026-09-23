@@ -30,6 +30,17 @@ describe("Codex protocol mapping", () => {
     expect(result.updatedAt).toBe("2023-11-14T22:13:20.000Z");
   });
 
+  it("attaches a normalized timestamp when mapping timeline items", () => {
+    expect(itemFromRaw({ type: "userMessage", id: "u1", content: [{ type: "text", text: "hello" }] }, "2024-01-02T03:04:05.000Z")).toMatchObject({
+      kind: "user",
+      createdAt: "2024-01-02T03:04:05.000Z",
+    });
+    expect(itemFromRaw({ type: "agentMessage", id: "a1", text: "hello", createdAt: 1_704_164_645 })).toMatchObject({
+      kind: "agent",
+      createdAt: "2024-01-02T03:04:05.000Z",
+    });
+  });
+
   it("keeps approval and user-input waits as active statuses", () => {
     expect(summaryFromRaw({ id: "approval", status: { type: "active", activeFlags: ["waitingOnApproval"] } }).status).toBe("waiting_approval");
     expect(summaryFromRaw({ id: "input", status: { type: "active", activeFlags: ["waitingOnUserInput"] } }).status).toBe("waiting_input");
