@@ -21,6 +21,14 @@ export async function waitForIdle({ readHealth, sleep, requiredSamples = 6, onSt
   }
 }
 
+export async function prepareRelease(buildDir, release, repo) {
+  await mkdir(path.dirname(release), { recursive: true, mode: 0o700 });
+  await cp(buildDir, release, { recursive: true, errorOnExist: true, force: false });
+  await chmod(release, 0o700);
+  await cp(path.join(repo, "package.json"), path.join(release, "package.json"));
+  await symlink(path.join(repo, "node_modules"), path.join(release, "node_modules"));
+}
+
 async function run(command, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -49,10 +57,7 @@ async function deploy() {
   const revision = await run("git", ["rev-parse", "--short=12", "HEAD"]);
   const suffix = new Date().toISOString().replace(/[:.]/g, "-");
   const release = path.join(stateDir, "releases", `${suffix}-${revision}`);
-  await mkdir(release, { recursive: true, mode: 0o700 });
-  await cp(buildDir, release, { recursive: true, errorOnExist: true, force: false });
-  await cp(path.join(repo, "package.json"), path.join(release, "package.json"));
-  await symlink(path.join(repo, "node_modules"), path.join(release, "node_modules"));
+  await prepareRelease(buildDir, release, repo);
   const unitTemplate = await readFile(path.join(repo, "deploy/codex-console.service"), "utf8");
   const environment = await readFile(environmentPath, "utf8");
   const originalUnit = await readFile(unitPath, "utf8");
