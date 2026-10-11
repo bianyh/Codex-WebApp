@@ -1,12 +1,10 @@
 import type { Item } from "./types";
+import { createCommandId } from "./commandId";
 
 const optimisticUserPrefix = "local-user-";
 
 function optimisticUserId(): string {
-  const random = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${optimisticUserPrefix}${random}`;
+  return `${optimisticUserPrefix}${createCommandId()}`;
 }
 
 export function createOptimisticUserItem(text: string, attachmentNames: string[] = []): Item {
@@ -23,9 +21,10 @@ export function createOptimisticUserItem(text: string, attachmentNames: string[]
 
 export function textFromRawItem(raw: Record<string, unknown>): string | undefined {
   if (typeof raw.text === "string") return raw.text;
-  const content = raw.content;
+  const result = raw.result && typeof raw.result === "object" ? raw.result as Record<string, unknown> : undefined;
+  const content = raw.content ?? raw.contentItems ?? raw.output ?? result?.content ?? raw.result ?? raw.error;
   if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return undefined;
+  if (!Array.isArray(content)) return content && typeof content === "object" ? JSON.stringify(content, null, 2) : undefined;
   const text = content.map((entry) => {
     if (typeof entry === "string") return entry;
     if (!entry || typeof entry !== "object") return "";

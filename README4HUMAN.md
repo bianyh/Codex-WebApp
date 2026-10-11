@@ -114,7 +114,7 @@ Install and start the service:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-ln -sfn "$PWD/deploy/codex-console.service" \
+install -m 600 "$PWD/deploy/codex-console.service" \
   ~/.config/systemd/user/codex-console.service
 systemctl --user daemon-reload
 systemctl --user enable --now codex-console.service
@@ -139,6 +139,8 @@ Restarting the service terminates the app-server Turn owned by that daemon. Wait
 
 The external Turn detector reads rollout links through `/proc/<pid>/fd` for the same user. Do not add systemd options such as `PrivateTmp=true` or `ProtectSystem=true`, which create an isolated mount namespace and break that detection.
 
+Copy the unit into the user configuration directory: do not symlink it to a repository on a late-mounted disk. For a checkout on a separate mount, add a machine-local `RequiresMountsFor=/actual/repository/path` dependency to `[Unit]`. The template waits for the configured Node executable and built daemon before starting.
+
 ## Security
 
 - Do not expose port `8787` directly to the public Internet. Prefer Tailscale/VPN or an HTTPS reverse proxy.
@@ -161,9 +163,30 @@ npm audit --omit=dev
 ```bash
 npm run codex:schema
 npm run build
+npm test
+npm run codex:smoke
 ```
 
 Generated files are placed under `generated/codex` and are ignored because they depend on the local Codex version. See [docs/TECHNICAL_DESIGN.md](docs/TECHNICAL_DESIGN.md) for the adapter and compatibility model.
+
+The protocol smoke test uses an isolated temporary Codex home and a loopback-only mock Responses provider. It does not use your credentials, call a paid model, or change existing conversations. Browser regression tests run with `npm run test:e2e` and cover plain-HTTP LAN origins.
+
+### Deferred deployment while conversations are running
+
+Build to an external staging directory instead of replacing live assets:
+
+```bash
+build_dir=$(mktemp -d)
+CODEX_CONSOLE_BUILD_DIR="$build_dir" npm run build
+npm test
+CODEX_CONSOLE_BUILD_DIR="$build_dir" npm run test:e2e
+```
+
+After validation, run `CODEX_CONSOLE_BUILD_DIR="$build_dir" npm run deploy:when-idle` through a separate user `systemd-run` service so it survives your Codex turn or SSH session ending. It stages a versioned release, waits for six consecutive idle checks five seconds apart, installs the user unit as a real file, preserves the existing environment, and restarts and health-checks the service. Failed health checks restore the prior configuration. Set `CODEX_CONSOLE_EXPECTED_VERSION` to require a particular running Codex version.
+
+Releases, configuration backups, and the final `result.json` are stored under `~/.local/state/codex-console/deployment`. The active release is selected with `current`. No API keys or plaintext passwords are written there. The new health endpoint checks active turns, commands, queued inputs, pending requests, and in-flight turn operations. When upgrading from an older daemon, only its available counters can be checked; avoid starting new commands during the idle window.
+
+Codex 0.162.1 uses `thread/revert` for paginated conversation history. Legacy histories cannot be reverted in place: editing the latest message creates a branch through the previous turn (or a new thread when editing the first turn), then sends the revised message there. The original legacy thread is preserved and the UI switches to the replacement automatically. Conversation rollback never reverts files already edited by Codex.
 
 ## Troubleshooting
 

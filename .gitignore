@@ -2,6 +2,7 @@ node_modules
 dist
 apps/daemon/data
 generated/codex
+generated/.codex-schema-*
 .env
 .DS_Store
 *.log

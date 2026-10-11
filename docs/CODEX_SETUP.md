@@ -108,7 +108,7 @@ chmod 600 "$HOME/.config/codex-console/environment"
 
 ```bash
 mkdir -p "$HOME/.config/systemd/user"
-ln -sfn "$PWD/deploy/codex-console.service" \
+install -m 600 "$PWD/deploy/codex-console.service" \
   "$HOME/.config/systemd/user/codex-console.service"
 systemctl --user daemon-reload
 systemctl --user enable --now codex-console.service
@@ -120,6 +120,8 @@ systemctl --user enable --now codex-console.service
 - 不要添加 `PrivateTmp=true` 或 `ProtectSystem=true`，因为外部 Turn 识别需要读取同一用户的 `/proc/<pid>/fd` rollout 链接；
 - `codex app-server` 只通过 stdio 启动，不配置公网监听参数；
 - 服务重启前再次检查活动 Turn。
+
+用户服务单元必须复制到用户配置目录，不要链接到可能延迟挂载的数据盘。仓库位于独立挂载点时，在机器本地单元的 `[Unit]` 中加入 `RequiresMountsFor=/actual/repository/path`；模板启动前也会等待 Node 和构建文件就绪。机器路径不能提交到仓库。
 
 启用后检查：
 
@@ -157,6 +159,8 @@ loginctl enable-linger "$USER"
 codex --version
 npm run codex:schema
 npm run build
+npm test
+npm run codex:smoke
 ```
 
 确认没有重要活动 Turn 后再重启服务：
@@ -166,6 +170,14 @@ systemctl --user restart codex-console.service
 ```
 
 若升级后出现协议未知事件或模型列表错误，保留日志中的方法名和 Codex 版本，阅读 `docs/TECHNICAL_DESIGN.md` 的协议适配章节；不要把完整提示词、文件内容或认证信息粘贴到公开 issue。
+
+### 等待空闲后自动部署
+
+有活动任务时不能覆盖运行中的构建文件或立即重启。先创建仓库外的独立构建目录，设置 `CODEX_CONSOLE_BUILD_DIR` 后执行 `npm run build`、`npm test` 和 `npm run test:e2e`。验证通过并提交后，以当前用户的独立 `systemd-run --user` 服务执行 `npm run deploy:when-idle`，传入同一个构建目录；可设置 `CODEX_CONSOLE_EXPECTED_VERSION` 验证实际 Codex 版本。
+
+脚本准备独立 release 后，每 5 秒检查健康接口，连续 6 次确认空闲才更新自启动单元并重启。无法读取健康状态、Codex 未就绪、活动对话未结束时继续等待。新服务健康接口还提供命令、排队消息、审批和 Turn 操作计数，部署会一并等待这些工作结束。首次从旧服务升级时只拥有旧健康接口的对话计数，安排部署期间不要新开命令或新发消息。
+
+已验证版本保存于 `~/.local/state/codex-console/deployment/releases`，当前版本由 `current` 链接指向。配置备份和部署结果也保存在此目录，权限限制为当前用户；不会保存密码明文。重启后健康检查失败会恢复原服务配置。此脚本不提交或推送代码，也不修改 Codex 凭据。
 
 ## 必须向用户确认的情况
 

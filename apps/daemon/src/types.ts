@@ -56,12 +56,19 @@ export type TimelineItem = {
 };
 
 export type PendingRequest = {
-  id: string;
-  kind: "command_approval" | "file_approval" | "user_input" | "permissions" | "unknown";
+  id: string | number;
+  method?: string;
+  kind: "command_approval" | "file_approval" | "user_input" | "permissions" | "tool_call" | "elicitation" | "unknown";
   title: string;
   detail?: string;
   command?: string;
   cwd?: string;
+  questions?: Array<{ id: string; header?: string; question: string; isSecret?: boolean; options?: Array<{ label: string; description?: string }> | null }>;
+  tool?: string;
+  arguments?: unknown;
+  permissions?: Record<string, unknown>;
+  requestedSchema?: unknown;
+  url?: string;
   options?: Array<{ label: string; value: string; description?: string }>;
   multiple?: boolean;
   createdAt: string;

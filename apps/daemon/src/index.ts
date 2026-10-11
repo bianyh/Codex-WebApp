@@ -12,7 +12,7 @@ import { z } from "zod";
 import { allowedOrigin, config } from "./config.js";
 import { loadState, getCustomModels, getState, persistState, setCustomModels } from "./state.js";
 import { authenticated, login, logout, requireAuth, setPassword } from "./auth.js";
-import { CodexProcess, errorTextFromRaw, itemFromRaw } from "./codex.js";
+import { CodexProcess, errorTextFromRaw, itemFromRaw, planFromRaw, statusFromRaw, tokenUsageFromRaw } from "./codex.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import { ThreadActivityTracker, type ThreadActivity } from "./threadActivity.js";
 import { runWorkspaceCommand } from "./workspaceCommand.js";
@@ -57,7 +57,7 @@ function publicThread(thread: ThreadSummary): ThreadSummary {
 }
 
 function publicSnapshot(snapshot: ThreadSnapshot): ThreadSnapshot {
-  return { ...snapshot, thread: publicThread(snapshot.thread) };
+  return { ...snapshot, thread: publicThread(snapshot.thread), pendingRequests: codex.getPendingRequests(snapshot.thread.id) };
 }
 
 function sendSocket(socket: WebSocket, payload: unknown): void {
@@ -253,19 +253,8 @@ function pushEvent(event: ConsoleEvent): void {
     event.sourceMethod === "mcpServer/elicitation/request" ||
     event.sourceMethod === "item/tool/call"
   );
-  const requestKind = event.sourceMethod.includes("requestUserInput")
-    ? "user_input"
-    : event.sourceMethod.includes("fileChange")
-      ? "file_approval"
-      : event.sourceMethod.includes("permissions")
-        ? "permissions"
-        : event.sourceMethod === "item/tool/call"
-          ? "tool_call"
-          : event.sourceMethod.includes("elicitation")
-            ? "elicitation"
-            : "command_approval";
   const payload = isRequest
-    ? JSON.stringify({ type: "server_request", eventId: event.eventId, threadId: event.threadId, request: { id: event.event.requestId, method: event.sourceMethod, kind: requestKind, title: event.sourceMethod.includes("requestUserInput") ? "Codex 需要你的输入" : event.sourceMethod === "item/tool/call" ? "Codex 请求调用工具" : "Codex 请求执行操作", detail: typeof event.event.command === "string" ? event.event.command : typeof event.event.reason === "string" ? event.event.reason : event.sourceMethod === "item/tool/call" ? `${String(event.event.namespace ?? "")} ${String(event.event.tool ?? "未知工具")}`.trim() : "请确认 Codex 的请求", command: typeof event.event.command === "string" ? event.event.command : undefined, cwd: typeof event.event.cwd === "string" ? event.event.cwd : undefined, questions: Array.isArray(event.event.questions) ? event.event.questions : undefined, tool: typeof event.event.tool === "string" ? event.event.tool : undefined, arguments: event.event.arguments, createdAt: event.receivedAt } })
+    ? JSON.stringify({ type: "server_request", eventId: event.eventId, threadId: event.threadId, request: codex.getPendingRequests(event.threadId ?? "").find((request) => request.id === event.event.requestId) })
     : JSON.stringify({ type: "thread_event", eventId: event.eventId, threadId: event.threadId, event: { method: event.sourceMethod, params: event.event, receivedAt: event.receivedAt } });
   for (const socket of sockets) {
     // A mobile client subscribes to one thread. Sending every other thread's
@@ -281,6 +270,9 @@ function updateSnapshot(event: ConsoleEvent): void {
   if (!snapshot) return;
   const params = event.event;
   const method = event.sourceMethod;
+  const turn = params.turn && typeof params.turn === "object" ? params.turn as Record<string, unknown> : undefined;
+  const turnId = typeof params.turnId === "string" ? params.turnId : typeof turn?.id === "string" ? turn.id : undefined;
+  if ((method === "turn/completed" || method === "turn/interrupted") && turnId && snapshot.thread.activeTurnId && turnId !== snapshot.thread.activeTurnId) return;
   if (method === "error" || method === "thread/realtime/error") {
     const message = errorTextFromRaw(params.error ?? params.message ?? params.additionalDetails);
     if (!snapshot.items.some((item) => item.kind === "system" && item.text === message)) {
@@ -317,7 +309,7 @@ function updateSnapshot(event: ConsoleEvent): void {
     if (!item) { item = { id: itemId, kind: "file_change", title: "File change", diff: "", status: "inProgress" }; snapshot.items.push(item); }
     item.diff = `${item.diff ?? ""}${String(params.delta ?? "")}`;
   } else if ((method === "item/started" || method === "item/completed") && params.item && typeof params.item === "object") {
-    const mapped = itemFromRaw(params.item);
+    const mapped = itemFromRaw(params.item, event.receivedAt);
     const index = snapshot.items.findIndex((candidate) => candidate.id === mapped.id);
     if (index >= 0) snapshot.items[index] = { ...snapshot.items[index], ...mapped };
     else snapshot.items.push(mapped);
@@ -327,7 +319,8 @@ function updateSnapshot(event: ConsoleEvent): void {
       for (const change of changes) {
         if (typeof change.path !== "string") continue;
         const existing = snapshot.changedFiles.find((entry) => entry.path === change.path);
-        const status = typeof change.kind === "string" ? change.kind : mapped.status ?? "modified";
+        const kind = change.kind && typeof change.kind === "object" ? change.kind as Record<string, unknown> : undefined;
+        const status = typeof change.kind === "string" ? change.kind : typeof kind?.type === "string" ? kind.type : mapped.status ?? "modified";
         if (existing) existing.status = status; else snapshot.changedFiles.push({ path: change.path, status });
       }
       if (mapped.diff) snapshot.diff = mapped.diff;
@@ -344,18 +337,24 @@ function updateSnapshot(event: ConsoleEvent): void {
     snapshot.thread.status = terminalStatus === "interrupted" ? "interrupted" : terminalStatus === "failed" || terminalStatus === "systemError" ? "failed" : "completed";
     snapshot.thread.activeTurnId = undefined;
     snapshot.thread.canInterrupt = false;
+    const lastAgent = [...snapshot.items].reverse().find((item) => item.kind === "agent");
+    if (terminalStatus === "completed" && lastAgent && !lastAgent.status) lastAgent.status = "final_answer";
+  } else if (method === "turn/started") {
+    snapshot.thread.status = "running";
+    snapshot.thread.activeTurnId = turnId;
+    snapshot.thread.canInterrupt = true;
+    snapshot.thread.activitySource = "console";
   } else if (method === "thread/status/changed") {
-    const status = params.status;
-    if (typeof status === "string") snapshot.thread.status = status as typeof snapshot.thread.status;
-    else if (status && typeof status === "object" && typeof (status as Record<string, unknown>).type === "string") snapshot.thread.status = String((status as Record<string, unknown>).type) as typeof snapshot.thread.status;
+    const status = statusFromRaw(params.status);
+    if (!(status === "idle" && snapshot.thread.activeTurnId)) snapshot.thread.status = status;
   } else if (method === "turn/diff/updated") {
     snapshot.diff = typeof params.diff === "string" ? params.diff : snapshot.diff;
   } else if (method === "turn/plan/updated") {
     const plan = params.plan;
-    if (Array.isArray(plan)) snapshot.plan = plan.map((entry) => typeof entry === "string" ? ({ text: entry }) : ({ text: String((entry as Record<string, unknown>).text ?? ""), completed: Boolean((entry as Record<string, unknown>).completed) }));
+    snapshot.plan = planFromRaw(plan);
   } else if (method === "thread/tokenUsage/updated") {
     const usage = params.tokenUsage;
-    if (usage && typeof usage === "object") snapshot.tokenUsage = usage as ThreadSnapshot["tokenUsage"];
+    snapshot.tokenUsage = tokenUsageFromRaw(usage) ?? snapshot.tokenUsage;
   }
 }
 
@@ -459,7 +458,7 @@ async function buildServer(): Promise<void> {
     for (const controller of runningCommands.values()) controller.abort();
     runningCommands.clear();
   });
-  daemon.get("/api/healthz", async (request) => ok(request, { ok: true, daemonVersion: "0.1.0", codexVersion: codex.version, appServer: codex.version === "unknown" ? "starting" : "ready", activeThreads: [...lastActivities.values()].filter((activity) => isTurnActiveStatus(activity.status)).length, loadedThreads: snapshots.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }));
+  daemon.get("/api/healthz", async (request) => ok(request, { ok: true, daemonVersion: "0.1.0", buildRevision: process.env.CODEX_CONSOLE_BUILD_REVISION, codexVersion: codex.version, appServer: codex.version === "unknown" ? "starting" : "ready", activeThreads: [...lastActivities.values()].filter((activity) => isTurnActiveStatus(activity.status)).length, activeCommands: runningCommands.size, queuedTurns: [...queuedTurns.values()].reduce((total, queue) => total + queue.length, 0), pendingRequests: [...snapshots.keys()].reduce((total, threadId) => total + codex.getPendingRequests(threadId).length, 0), turnOperations: turnOperations.size, loadedThreads: snapshots.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }));
   daemon.post<{ Body: { password?: string } }>("/api/auth/login", async (request, reply) => { await login(request, reply, typeof request.body?.password === "string" ? request.body.password : ""); return; });
   daemon.post("/api/auth/logout", async (request, reply) => { if (!(await requireAuth(request, reply))) return; await logout(request, reply); });
   daemon.get("/api/auth/me", async (request, reply) => { if (!(await requireAuth(request, reply))) return; return ok(request, { authenticated: true, passwordConfigured: Boolean(getState().passwordHash), codexVersion: codex.version }); });
@@ -834,9 +833,6 @@ async function buildServer(): Promise<void> {
                 attachments: item.attachments.map(({ name, kind, size }) => ({ name, kind, size })),
               })),
             }));
-            const lastEventId = typeof action.lastEventId === "string" ? action.lastEventId : undefined;
-            const index = lastEventId ? eventBuffer.findIndex((event) => event.eventId === lastEventId) : -1;
-            if (lastEventId && index >= 0) for (const event of eventBuffer.slice(index + 1)) if (!event.threadId || event.threadId === action.threadId) socket.send(JSON.stringify({ type: "thread_event", eventId: event.eventId, threadId: event.threadId, event: { method: event.sourceMethod, params: event.event } }));
             return;
           }
           if (action.type === "start_turn" && typeof action.threadId === "string" && (typeof action.text === "string" || Array.isArray(action.attachments))) {
@@ -854,8 +850,6 @@ async function buildServer(): Promise<void> {
                 queueTurn(action.threadId as string, input, model);
                 return;
               }
-              thread.status = "running";
-              const snapshot = snapshots.get(action.threadId as string); if (snapshot) snapshot.thread.status = "running";
               await codex.startTurn(action.threadId as string, input, { model, effort: typeof action.effort === "string" ? action.effort : undefined });
             });
             return;
@@ -915,13 +909,21 @@ async function buildServer(): Promise<void> {
             await serializeTurnOperation(action.threadId, async () => {
               const activity = await activityTracker.inspect(knownThreads.get(action.threadId as string) ?? snapshots.get(action.threadId as string)?.thread ?? { id: action.threadId as string, title: "", status: "unknown" });
               if (isTurnActiveStatus(activity.status)) throw new Error("请先中止当前运行，再编辑并重新发送最近消息");
-              await codex.rollbackLastTurn(action.threadId as string);
-              const rolledBack = await codex.readThread(action.threadId as string);
+              const input = await resolveTurnInput(action);
+              const rolledBack = await codex.rollbackLastTurn(action.threadId as string);
               rolledBack.thread.canRetry = true;
               knownThreads.set(rolledBack.thread.id, rolledBack.thread);
               snapshots.set(rolledBack.thread.id, rolledBack);
-              broadcast({ type: "thread_snapshot", eventId: randomUUID(), snapshot: publicSnapshot(rolledBack) }, action.threadId as string);
-              await codex.startTurn(action.threadId as string, { text: action.text as string, attachments: [] }, { model: typeof action.model === "string" && action.model ? action.model : undefined });
+              const replaced = rolledBack.thread.id !== action.threadId;
+              broadcast({ type: "thread_snapshot", eventId: randomUUID(), snapshot: publicSnapshot(rolledBack), replacesThreadId: replaced ? action.threadId : undefined }, action.threadId as string);
+              if (replaced) {
+                for (const [client, threadId] of subscriptions) if (threadId === action.threadId) subscriptions.set(client, rolledBack.thread.id);
+              }
+              try {
+                await codex.startTurn(rolledBack.thread.id, input, { model: typeof action.model === "string" && action.model ? action.model : undefined });
+              } catch (error) {
+                broadcast({ type: "error", threadId: rolledBack.thread.id, error: { code: "retry_failed", message: error instanceof Error ? error.message : "重发失败，历史已回退，请直接重新发送", retryable: true } }, rolledBack.thread.id);
+              }
             });
             return;
           }
@@ -948,6 +950,7 @@ const cliHandled = await runCli();
 if (!cliHandled) {
   await buildServer();
   await daemon.listen({ host: config.host, port: config.port });
+  void codex.start().catch(() => daemon.log.warn("Codex app-server 初始化失败，发送请求时将重试"));
   daemon.log.info(`Codex Console listening on http://${config.host}:${config.port}`);
   process.once("SIGINT", async () => { await codex.stop(); await daemon.close(); process.exit(0); });
   process.once("SIGTERM", async () => { await codex.stop(); await daemon.close(); process.exit(0); });

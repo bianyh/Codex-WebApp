@@ -14,7 +14,7 @@
 
 OpenAI Docs 在当前网络环境下无法直接抓取正文，官方页面可能返回访问拦截页。因此，实际协议以运行时安装的 Codex 版本通过 `generate-ts`/`generate-json-schema` 生成的产物为准；升级时再用 [OpenAI Docs - Codex](https://developers.openai.com/codex) 核对语义和兼容性。本文不把实验性协议字段当作跨版本稳定 API。
 
-当前开发机实测版本是 `codex-cli 0.115.0`。`codex app-server` 及协议仍属于 experimental，必须在项目中固定版本、记录能力集并维护兼容测试。
+原始设计基线为 `codex-cli 0.115.0`；当前兼容性验证版本为 `0.162.1`。`codex app-server` 及协议仍属于 experimental，必须记录能力集并维护兼容测试。
 
 ## 2. 目标和非目标
 
@@ -199,6 +199,17 @@ interface CodexAdapter {
 未知通知必须保留为 `unknown` 事件并记录协议方法名，不得因为一个新事件让整个连接崩溃。未知的服务端请求默认拒绝，并在 UI 显示“当前版本不支持此请求”。
 
 ### 5.3 第一版使用的方法和事件
+
+#### 0.162.1 兼容约定
+
+- `thread/rollback` 已移除。分页线程先通过 `thread/turns/list` 找到最后一轮，再发送 `thread/revert {threadId,beforeTurnId}`；此操作只调整会话历史，不撤销文件修改。
+- `historyMode=legacy` 不能使用 `thread/revert`。旧版服务器保留原有 rollback；新版服务器改为 `thread/fork {threadId,lastTurnId}` 保留截至上一轮的历史，第一轮重发创建同目录和模型/审批/沙箱设置的新线程。原线程不被截断，前端通过 `replacesThreadId` 切换订阅。
+- 分页历史使用 `thread/read includeTurns=false` 获取元数据，通过 `thread/turns/list itemsView=full` 顺序读取所有页。未持久化的新线程可能尚无分页历史，按空历史处理。
+- Plan 的步骤为 `{step,status}`；Token 用量为 `{total:{inputTokens,outputTokens,totalTokens},last:...}`；文件修改类型为 `{type,move_path?}`。daemon 与前端均规范化为稳定领域字段，不把对象直接渲染为数字或状态文字。
+- 权限请求回复 `{permissions,scope:"turn"}`，MCP elicitation 回复 `{action,content,_meta}`，不是通用 `{decision}`。所有 pending 请求保存在进程适配层，刷新和重新订阅时恢复；未知请求返回 JSON-RPC 错误，避免永久等待。
+- 普通 HTTP 局域网可能没有 `crypto.randomUUID`。所有前端本地 ID 复用兼容生成器；React 错误边界提供重载入口。发送失败显示错误并恢复文本，不允许错误展示自身导致黑屏。
+- 启动 daemon 后主动初始化 app-server，健康检查无需浏览器先打开模型列表。退出后立即将版本/ready 状态清空；后续请求可重新启动进程。
+- `npm run codex:smoke` 用隔离 Codex home 与本机模拟模型验证真实进程握手、发送、回退重发和旧历史分支；`npm run test:e2e` 验证局域网 HTTP 的 UI 回归。协议生成目录不提交。
 
 当前生成的协议至少包含以下能力，具体字段必须以生成产物为准：
 

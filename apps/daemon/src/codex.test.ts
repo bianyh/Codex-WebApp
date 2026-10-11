@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { errorTextFromRaw, itemFromRaw, summaryFromRaw, userInputFromTurn } from "./codex.js";
+import { CodexProcess, errorTextFromRaw, itemFromRaw, planFromRaw, snapshotFromRaw, summaryFromRaw, tokenUsageFromRaw, userInputFromTurn } from "./codex.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import {
   parseLatestRolloutActivity,
@@ -10,6 +10,17 @@ import {
 } from "./threadActivity.js";
 
 describe("Codex protocol mapping", () => {
+  it("uses the model name, not its provider label", () => {
+    expect(summaryFromRaw({ id: "t", model: "new-model", modelProvider: "openai" }).model).toBe("new-model");
+    expect(summaryFromRaw({ id: "t", modelProvider: "openai" }).model).toBeUndefined();
+  });
+  it("does not label unfinished legacy agent messages as final", () => {
+    expect(snapshotFromRaw({ id: "t", turns: [{ id: "turn", status: "inProgress", items: [{ type: "agentMessage", id: "a", text: "Working" }] }] }).items[0]?.status).toBeUndefined();
+  });
+  it("maps current plans and token usage in the daemon", () => {
+    expect(planFromRaw([{ step: "done", status: "completed" }])).toEqual([{ text: "done", completed: true }]);
+    expect(tokenUsageFromRaw({ total: { inputTokens: 2, outputTokens: 3, totalTokens: 5 } })).toEqual({ input: 2, output: 3, total: 5 });
+  });
   it("maps uploaded attachments to native Codex user input", () => {
     expect(userInputFromTurn({
       text: "inspect these",
@@ -60,6 +71,86 @@ describe("Codex protocol mapping", () => {
 
   it("extracts changed files and diffs from completed fileChange items", () => {
     expect(itemFromRaw({ type: "fileChange", id: "f1", status: "completed", changes: [{ path: "src/app.ts", kind: "update", diff: "@@ -1 +1 @@" }] })).toMatchObject({ id: "f1", kind: "file_change", path: "src/app.ts", diff: "@@ -1 +1 @@", metadata: { changes: [{ path: "src/app.ts", kind: "update" }] } });
+  });
+});
+
+describe("history and resend compatibility", () => {
+  it("returns empty history for a new, unmaterialized paginated thread", async () => {
+    const process = new CodexProcess();
+    vi.spyOn(process, "request").mockImplementation(async (method) => {
+      if (method === "thread/read") return { thread: { id: "new", historyMode: "paginated" } };
+      throw new Error("thread new is not materialized yet; thread/turns/list is unavailable before first user message");
+    });
+    await expect(process.readThread("new")).resolves.toMatchObject({ thread: { id: "new" }, items: [] });
+  });
+  it("keeps the original rollback method when an older server supports it", async () => {
+    const process = new CodexProcess();
+    const rpc = vi.spyOn(process, "request").mockImplementation(async (method) => {
+      if (method === "thread/read") return { thread: { id: "t", turns: [{ id: "last", status: "completed", items: [] }] } };
+      return {};
+    });
+    expect((await process.rollbackLastTurn("t")).thread.id).toBe("t");
+    expect(rpc).toHaveBeenCalledWith("thread/rollback", { threadId: "t", numTurns: 1 });
+    expect(rpc.mock.calls.some(([method]) => method === "thread/fork")).toBe(false);
+  });
+  it("hydrates paginated turns before selecting the revert target", async () => {
+    const process = new CodexProcess();
+    const rpc = vi.spyOn(process, "request").mockImplementation(async (method, params) => {
+      const input = params as Record<string, unknown>;
+      if (method === "thread/read") return { thread: { id: "t", historyMode: "paginated" } };
+      if (method === "thread/turns/list") return input.cursor === "next"
+        ? { data: [{ id: "last", status: "completed", items: [] }], nextCursor: null }
+        : { data: [{ id: "first", status: "completed", items: [] }], nextCursor: "next" };
+      return {};
+    });
+    const result = await process.rollbackLastTurn("t");
+    expect(result.thread.id).toBe("t");
+    expect(rpc).toHaveBeenCalledWith("thread/revert", { threadId: "t", beforeTurnId: "last" });
+    expect(rpc.mock.calls.some(([method]) => method === "thread/rollback")).toBe(false);
+  });
+  it("preserves legacy history by forking through the previous turn when rollback was removed", async () => {
+    const process = new CodexProcess();
+    const original = { id: "t", historyMode: "legacy", turns: [{ id: "first", status: "completed", items: [] }, { id: "last", status: "completed", items: [] }] };
+    const rpc = vi.spyOn(process, "request").mockImplementation(async (method, params) => {
+      const input = params as Record<string, unknown>;
+      if (method === "thread/read") return { thread: input.threadId === "branch" ? { ...original, id: "branch", turns: original.turns.slice(0, 1) } : original };
+      if (method === "thread/rollback") throw new Error("Invalid request: unknown variant `thread/rollback`");
+      if (method === "thread/fork") return { thread: { id: "branch", turns: [] } };
+      return {};
+    });
+    expect((await process.rollbackLastTurn("t")).thread.id).toBe("branch");
+    expect(rpc).toHaveBeenCalledWith("thread/fork", { threadId: "t", lastTurnId: "first" });
+    expect(rpc.mock.calls.some(([method]) => method === "thread/revert")).toBe(false);
+  });
+  it("does not fall back or truncate when rollback returns an operational failure", async () => {
+    const process = new CodexProcess();
+    const rpc = vi.spyOn(process, "request").mockImplementation(async (method) => {
+      if (method === "thread/read") return { thread: { id: "t", historyMode: "legacy", turns: [{ id: "last", status: "completed", items: [] }] } };
+      if (method === "thread/rollback") throw new Error("Thread is busy");
+      return {};
+    });
+    await expect(process.rollbackLastTurn("t")).rejects.toThrow("Thread is busy");
+    expect(rpc.mock.calls.some(([method]) => method === "thread/fork" || method === "thread/start")).toBe(false);
+  });
+});
+
+describe("server-request lifecycle", () => {
+  it("restores typed pending requests in snapshots and clears them on resolution", async () => {
+    const process = new CodexProcess();
+    const transport = process as unknown as { handleLine(line: string): void };
+    transport.handleLine(JSON.stringify({ id: 42, method: "item/permissions/requestApproval", params: { threadId: "t", permissions: { network: { enabled: true }, fileSystem: null } } }));
+    vi.spyOn(process, "request").mockResolvedValue({ thread: { id: "t", turns: [] } });
+    expect((await process.readThread("t")).pendingRequests[0]).toMatchObject({ id: 42, kind: "permissions", permissions: { network: { enabled: true } } });
+    transport.handleLine(JSON.stringify({ method: "serverRequest/resolved", params: { requestId: 42 } }));
+    expect(process.getPendingRequests("t")).toEqual([]);
+  });
+  it("does not leave unsupported requests waiting forever", () => {
+    const process = new CodexProcess();
+    const events: string[] = [];
+    process.onEvent((event) => events.push(event.sourceMethod));
+    (process as unknown as { handleLine(line: string): void }).handleLine(JSON.stringify({ id: 43, method: "future/request", params: { threadId: "t" } }));
+    expect(process.getPendingRequests("t")).toEqual([]);
+    expect(events).toEqual(["configWarning"]);
   });
 });
 

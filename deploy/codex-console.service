@@ -18,9 +18,11 @@ Environment=CODEX_CWD=%h/Codex-WebApp
 Environment=CODEX_COMMAND=codex
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-%h/.config/codex-console/environment
-ExecStart=/bin/sh -c 'cd "$CODEX_CONSOLE_REPO" && exec "$CODEX_NODE" apps/daemon/dist/index.js'
+ExecStartPre=/bin/sh -c 'until command -v "$CODEX_NODE" >/dev/null 2>&1 && [ -f "${CODEX_CONSOLE_RELEASE_DIR:-$CODEX_CONSOLE_REPO}/apps/daemon/dist/index.js" ]; do sleep 2; done'
+ExecStart=/bin/sh -c 'cd "${CODEX_CONSOLE_RELEASE_DIR:-$CODEX_CONSOLE_REPO}" && exec "$CODEX_NODE" apps/daemon/dist/index.js'
 Restart=always
 RestartSec=3
+TimeoutStartSec=infinity
 TimeoutStopSec=20
 KillMode=mixed
 NoNewPrivileges=true

@@ -60,6 +60,7 @@ function errorTextFromRaw(value: unknown): string {
 
 function statusFromRaw(value: unknown): ThreadStatus {
   if (typeof value === "string") {
+    if (value === "systemError") return "failed";
     if (["idle", "running", "waiting_approval", "waiting_input", "completed", "failed", "interrupted"].includes(value)) return value as ThreadStatus;
     return "unknown";
   }
@@ -75,7 +76,7 @@ function statusFromRaw(value: unknown): ThreadStatus {
       if (type.includes("awaiting") || type.includes("approval")) return "waiting_approval";
       if (type === "idle" || type === "notLoaded") return "idle";
       if (type === "completed") return "completed";
-      if (type === "failed") return "failed";
+      if (type === "failed" || type === "systemError") return "failed";
       if (type === "interrupted") return "interrupted";
     }
   }
@@ -94,7 +95,7 @@ function summaryFromRaw(raw: unknown): ThreadSummary {
     cwd: typeof value.cwd === "string" ? value.cwd : undefined,
     status: statusFromRaw(value.status),
     updatedAt: updated ?? created,
-    model: typeof value.modelProvider === "string" ? value.modelProvider : undefined,
+    model: typeof value.model === "string" ? value.model : undefined,
     rolloutPath: typeof value.path === "string" ? value.path : undefined,
   };
 }
@@ -126,8 +127,58 @@ function itemFromRaw(raw: unknown, fallbackCreatedAt?: string): TimelineItem {
     return { id, kind: "file_change", createdAt, path: typeof value.path === "string" ? value.path : typeof changes[0]?.path === "string" ? changes[0].path : undefined, diff: typeof value.diff === "string" ? value.diff : changes.map((change) => typeof change.diff === "string" ? change.diff : "").filter(Boolean).join("\n"), status: typeof value.status === "string" ? value.status : undefined, title: changes.length === 1 ? "File change" : `${changes.length} file changes`, metadata: { changes } };
   }
   if (type === "plan") return { id, kind: "plan", createdAt, text: typeof value.text === "string" ? value.text : textFromContent(value.content), title: "Plan" };
-  if (type.toLowerCase().includes("mcp")) return { id, kind: "mcp", createdAt, title: typeof value.name === "string" ? value.name : "MCP tool", text: typeof value.result === "string" ? value.result : undefined, status: typeof value.status === "string" ? value.status : undefined };
+  if (type === "functionCallOutput" || type === "dynamicToolCall" || type.toLowerCase().includes("mcp")) {
+    const result = value.result && typeof value.result === "object" ? value.result as Record<string, unknown> : undefined;
+    const content = value.output ?? value.contentItems ?? result?.content ?? value.result ?? value.error;
+    return { id, kind: "mcp", createdAt, title: typeof value.name === "string" ? value.name : typeof value.tool === "string" ? value.tool : "MCP tool", text: textFromContent(content) || (content && typeof content === "object" ? JSON.stringify(content, null, 2) : undefined), status: typeof value.status === "string" ? value.status : undefined };
+  }
   return { id, kind: "unknown", createdAt, title: type, metadata: value };
+}
+
+function snapshotFromRaw(raw: Record<string, unknown>): ThreadSnapshot {
+  const summary = summaryFromRaw(raw);
+  const turns = Array.isArray(raw.turns) ? raw.turns : [];
+  const items = turns.flatMap((turn) => {
+    const value = (turn && typeof turn === "object" ? turn : {}) as Record<string, unknown>;
+    const startedAt = timestampToIso(value.startedAt) ?? summary.updatedAt;
+    const mapped = Array.isArray(value.items) ? value.items.map((item) => itemFromRaw(item, startedAt)) : [];
+    const lastAgent = [...mapped].reverse().find((item) => item.kind === "agent");
+    if (lastAgent && !lastAgent.status && value.status === "completed") lastAgent.status = "final_answer";
+    if (value.error) mapped.push({ id: `codex-error-${String(value.id ?? randomUUID())}`, kind: "system", createdAt: startedAt, title: "Codex 错误", text: errorTextFromRaw(value.error), status: "failed" });
+    if (value.status === "inProgress" && typeof value.id === "string") summary.activeTurnId = value.id;
+    return mapped;
+  });
+  const changedFiles: NonNullable<ThreadSnapshot["changedFiles"]> = [];
+  for (const item of items) {
+    if (item.kind !== "file_change" || !Array.isArray(item.metadata?.changes)) continue;
+    for (const change of item.metadata.changes) {
+      if (!change || typeof change.path !== "string") continue;
+      const kind = typeof change.kind === "string" ? change.kind : change.kind?.type;
+      const existing = changedFiles.find((file) => file.path === change.path);
+      if (existing) existing.status = kind;
+      else changedFiles.push({ path: change.path, status: typeof kind === "string" ? kind : undefined });
+    }
+  }
+  return { thread: summary, items, pendingRequests: [], changedFiles, plan: [], diff: "" };
+}
+
+export function planFromRaw(value: unknown): NonNullable<ThreadSnapshot["plan"]> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (typeof entry === "string") return [{ text: entry, completed: false }];
+    if (!entry || typeof entry !== "object") return [];
+    const step = entry as Record<string, unknown>;
+    const text = typeof step.step === "string" ? step.step : typeof step.text === "string" ? step.text : "";
+    return text ? [{ text, completed: step.status === "completed" || step.completed === true }] : [];
+  });
+}
+
+export function tokenUsageFromRaw(value: unknown): ThreadSnapshot["tokenUsage"] {
+  if (!value || typeof value !== "object") return undefined;
+  const usage = value as Record<string, unknown>;
+  const totals = usage.total && typeof usage.total === "object" ? usage.total as Record<string, unknown> : usage;
+  const number = (candidate: unknown): number | undefined => typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined;
+  return { input: number(totals.inputTokens ?? totals.input), output: number(totals.outputTokens ?? totals.output), total: number(totals.totalTokens ?? totals.total) };
 }
 
 export class CodexProcess {
@@ -140,12 +191,14 @@ export class CodexProcess {
   private stopping = false;
   private loadedThreads = new Set<string>();
   private activeTurns = new Map<string, string>();
+  private pendingRequests = new Map<string | number, { threadId?: string; request: PendingRequest }>();
   private _version = "unknown";
   private _capabilities: AdapterCapabilities = { codexVersion: "unknown", methods: [], supportsSteer: true, supportsApprovals: true, supportsDiff: true, supportsPlan: true };
 
   get version(): string { return this._version; }
   get capabilities(): AdapterCapabilities { return this._capabilities; }
   get pid(): number | undefined { return this.child?.pid; }
+  getPendingRequests(threadId: string): PendingRequest[] { return [...this.pendingRequests.values()].filter((entry) => entry.threadId === threadId).map((entry) => entry.request); }
   activeTurnId(threadId: string): string | undefined {
     return this.activeTurns.get(threadId);
   }
@@ -188,6 +241,8 @@ export class CodexProcess {
       });
       child.once("exit", (code, signal) => {
         this.child = null;
+        this._version = "unknown";
+        this.pendingRequests.clear();
         // Do not leave a turn owned by a process that no longer exists. The
         // activity tracker uses this map to decide whether a thread is
         // interruptible; stale entries make a restarted app-server look
@@ -226,6 +281,8 @@ export class CodexProcess {
     this.child = null;
     this.activeTurns.clear();
     this.loadedThreads.clear();
+    this.pendingRequests.clear();
+    this._version = "unknown";
     this.rejectAll(new Error("Codex app-server stopped"));
     child.kill("SIGTERM");
     await new Promise<void>((resolve) => { const timer = setTimeout(() => { child.kill("SIGKILL"); resolve(); }, 1500); child.once("exit", () => { clearTimeout(timer); resolve(); }); });
@@ -301,33 +358,36 @@ export class CodexProcess {
   }
 
   async readThread(threadId: string): Promise<ThreadSnapshot> {
-    const result = await this.request("thread/read", { threadId, includeTurns: true });
-    const raw = (result && typeof result === "object" ? (result as Record<string, unknown>).thread : {}) as Record<string, unknown>;
-    const summary = summaryFromRaw(raw);
-    const turns = Array.isArray(raw.turns) ? raw.turns : [];
-    const items = turns.flatMap((turn) => {
-      const t = (turn && typeof turn === "object" ? turn : {}) as Record<string, unknown>;
-      const turnStartedAt = timestampToIso(t.startedAt) ?? summary.updatedAt;
-      const mapped = Array.isArray(t.items) ? t.items.map((item) => itemFromRaw(item, turnStartedAt)) : [];
-      // Some older providers omit MessagePhase. The last assistant message
-      // in a completed turn is still the user-visible final reply; mark it so
-      // the UI can separate it from progress narration.
-      const lastAgent = [...mapped].reverse().find((item) => item.kind === "agent");
-      if (lastAgent && !lastAgent.status) lastAgent.status = "final_answer";
-      const status = typeof t.status === "string" ? t.status : "";
-      if ((status === "failed" || status === "systemError" || t.error) && t.error) {
-        mapped.push({
-          id: `codex-error-${String(t.id ?? randomUUID())}`,
-          kind: "system",
-          createdAt: turnStartedAt,
-          title: "Codex 错误",
-          text: errorTextFromRaw(t.error),
-          status: "failed",
-        });
+    const snapshot = snapshotFromRaw(await this.readRawThread(threadId));
+    snapshot.pendingRequests = this.getPendingRequests(threadId);
+    return snapshot;
+  }
+
+  private async readRawThread(threadId: string): Promise<Record<string, unknown>> {
+    const result = await this.request("thread/read", { threadId, includeTurns: false }) as { thread: Record<string, unknown> };
+    const raw = result.thread;
+    if (!raw || typeof raw.id !== "string") throw new Error("Codex 返回了无效的线程数据");
+    if (raw.historyMode !== "paginated") {
+      const history = await this.request("thread/read", { threadId, includeTurns: true }) as { thread: Record<string, unknown> };
+      return history.thread;
+    }
+    const turns: unknown[] = [];
+    let cursor: string | null = null;
+    const seen = new Set<string>();
+    do {
+      let page: { data?: unknown[]; nextCursor?: string };
+      try {
+        page = await this.request("thread/turns/list", { threadId, cursor, limit: 100, sortDirection: "asc", itemsView: "full" }) as typeof page;
+      } catch (error) {
+        if (cursor === null && turns.length === 0 && error instanceof Error && /not materialized yet/i.test(error.message)) return { ...raw, turns: [] };
+        throw error;
       }
-      return mapped;
-    });
-    return { thread: summary, items, pendingRequests: [], changedFiles: [], plan: [], diff: "" };
+      if (Array.isArray(page.data)) turns.push(...page.data);
+      cursor = typeof page.nextCursor === "string" ? page.nextCursor : null;
+      if (cursor && seen.has(cursor)) throw new Error("Codex 返回了重复的历史分页游标");
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return { ...raw, turns };
   }
 
   async startThread(input: { cwd?: string; model?: string; sandbox?: string; approvalPolicy?: string }): Promise<ThreadSnapshot> {
@@ -353,11 +413,42 @@ export class CodexProcess {
 
   async steerTurn(threadId: string, turnId: string, input: TurnInput): Promise<unknown> { return this.request("turn/steer", { threadId, expectedTurnId: turnId, input: userInputFromTurn(input) }); }
   async interruptTurn(threadId: string, turnId: string): Promise<unknown> { return this.request("turn/interrupt", { threadId, turnId }); }
-  async rollbackLastTurn(threadId: string): Promise<void> {
+  async rollbackLastTurn(threadId: string): Promise<ThreadSnapshot> {
     await this.ensureLoaded(threadId);
-    await this.request("thread/rollback", { threadId, numTurns: 1 });
+    const raw = await this.readRawThread(threadId);
+    const turns = Array.isArray(raw.turns) ? raw.turns as Record<string, unknown>[] : [];
+    const last = turns.at(-1);
+    if (!last || typeof last.id !== "string") throw new Error("该线程没有可以回退的消息");
+    if (last.status === "inProgress") throw new Error("请先中止当前运行，再重新发送最近消息");
+    if (raw.historyMode === "paginated") {
+      await this.request("thread/revert", { threadId, beforeTurnId: last.id });
+      return this.readThread(threadId);
+    }
+    try {
+      await this.request("thread/rollback", { threadId, numTurns: 1 });
+      return this.readThread(threadId);
+    } catch (error) {
+      if (!(error instanceof Error) || !/unknown variant [`'"]thread\/rollback|method not found|unknown method/i.test(error.message)) throw error;
+    }
+    const previous = turns.at(-2);
+    const settings = previous ? undefined : await this.request("thread/resume", { threadId }) as Record<string, unknown>;
+    const sandbox = settings?.sandbox && typeof settings.sandbox === "object" ? settings.sandbox as Record<string, unknown> : undefined;
+    const sandboxMode = sandbox?.type === "readOnly" ? "read-only" : sandbox?.type === "workspaceWrite" ? "workspace-write" : sandbox?.type === "dangerFullAccess" ? "danger-full-access" : undefined;
+    const result = previous
+      ? await this.request("thread/fork", { threadId, lastTurnId: previous.id }) as { thread: Record<string, unknown> }
+      : await this.request("thread/start", { cwd: raw.cwd, model: settings?.model ?? raw.model ?? null, modelProvider: settings?.modelProvider ?? raw.modelProvider ?? null, approvalPolicy: settings?.approvalPolicy ?? null, sandbox: sandboxMode ?? null, config: typeof settings?.reasoningEffort === "string" ? { model_reasoning_effort: settings.reasoningEffort } : null, ephemeral: false }) as { thread: Record<string, unknown> };
+    const replacement = snapshotFromRaw(result.thread);
+    if (!replacement.thread.id) throw new Error("Codex 未返回重发分支的线程 ID");
+    this.loadedThreads.add(replacement.thread.id);
+    return this.readThread(replacement.thread.id);
   }
-  async respond(requestId: string | number, response: unknown): Promise<void> { await this.writeResponse(requestId, response); }
+  async respond(requestId: string | number, response: unknown): Promise<void> {
+    if (!this.pendingRequests.has(requestId)) throw new Error("该请求已处理或不存在，请刷新线程");
+    await this.writeResponse(requestId, response);
+    const pending = this.pendingRequests.get(requestId);
+    this.pendingRequests.delete(requestId);
+    this.emit({ sourceMethod: "serverRequest/resolved", params: { requestId, threadId: pending?.threadId } });
+  }
 
   private async startIfNeeded(method: string): Promise<void> { if (!this.child && method !== "initialize") await this.start(); }
   private async ensureLoaded(threadId: string): Promise<void> {
@@ -382,10 +473,38 @@ export class CodexProcess {
       const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
       const turn = params.turn && typeof params.turn === "object" ? params.turn as Record<string, unknown> : undefined;
       const turnId = typeof params.turnId === "string" ? params.turnId : typeof turn?.id === "string" ? turn.id : undefined;
+      if (message.id !== undefined) {
+        const supported = ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/tool/requestUserInput", "item/permissions/requestApproval", "mcpServer/elicitation/request", "item/tool/call"];
+        if (!supported.includes(message.method)) {
+          this.child?.stdin.write(JSON.stringify({ id: message.id, error: { code: -32601, message: `Unsupported server request: ${message.method}` } }) + "\n");
+          this.emit({ sourceMethod: "configWarning", params: { threadId, message: `当前控制台不支持 Codex 请求 ${message.method}，已拒绝该请求` } });
+          return;
+        }
+        const kind: PendingRequest["kind"] = message.method.includes("requestUserInput") ? "user_input" : message.method.includes("fileChange") ? "file_approval" : message.method.includes("permissions") ? "permissions" : message.method === "item/tool/call" ? "tool_call" : message.method.includes("elicitation") ? "elicitation" : "command_approval";
+        const request: PendingRequest = {
+          id: message.id, method: message.method, kind, title: kind === "user_input" ? "Codex 需要你的输入" : kind === "tool_call" ? "Codex 请求调用工具" : "Codex 请求执行操作",
+          detail: typeof params.command === "string" ? params.command : typeof params.reason === "string" ? params.reason : typeof params.message === "string" ? params.message : "请确认 Codex 的请求",
+          command: typeof params.command === "string" ? params.command : undefined,
+          cwd: typeof params.cwd === "string" ? params.cwd : undefined,
+          questions: Array.isArray(params.questions) ? params.questions as PendingRequest["questions"] : undefined,
+          tool: typeof params.tool === "string" ? params.tool : undefined,
+          arguments: params.arguments,
+          permissions: params.permissions && typeof params.permissions === "object" ? params.permissions as Record<string, unknown> : undefined,
+          requestedSchema: params.requestedSchema,
+          url: typeof params.url === "string" ? params.url : undefined,
+          createdAt: new Date().toISOString(),
+        };
+        this.pendingRequests.set(message.id, { threadId, request });
+      }
+      if (message.method === "serverRequest/resolved" && (typeof params.requestId === "string" || typeof params.requestId === "number")) this.pendingRequests.delete(params.requestId);
+      if ((message.method === "turn/completed" || message.method === "turn/interrupted" || message.method === "thread/closed") && threadId) {
+        for (const [id, pending] of this.pendingRequests) if (pending.threadId === threadId) this.pendingRequests.delete(id);
+      }
       if (message.method === "turn/started" && threadId && turnId) {
         this.activeTurns.set(threadId, turnId);
       }
       if ((message.method === "turn/completed" || message.method === "turn/interrupted" || message.method === "thread/closed") && threadId) {
+        if (message.method === "thread/closed") this.loadedThreads.delete(threadId);
         const activeTurnId = this.activeTurns.get(threadId);
         // A late completion from an older turn must not clear a newer turn.
         // Older app-server versions omitted the turn id, so retain the
@@ -415,4 +534,4 @@ export class CodexProcess {
   private rejectAll(error: Error): void { for (const waiter of this.waiters.values()) { clearTimeout(waiter.timer); waiter.reject(error); } this.waiters.clear(); }
 }
 
-export { errorTextFromRaw, itemFromRaw, summaryFromRaw, userInputFromTurn };
+export { errorTextFromRaw, itemFromRaw, snapshotFromRaw, statusFromRaw, summaryFromRaw, userInputFromTurn };

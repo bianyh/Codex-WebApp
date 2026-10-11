@@ -76,6 +76,10 @@ import { formatMessageTimestamp } from "./messageTime";
 import { NewThreadDialog } from "./NewThreadDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { CommandPanel } from "./CommandPanel";
+import { createCommandId } from "./commandId";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { changeStatusFromRaw, planFromRaw, tokenUsageFromRaw } from "./protocolMapping";
+import { responseForRequest } from "./requestResponse";
 import "./styles.css";
 import "katex/dist/katex.min.css";
 
@@ -700,6 +704,23 @@ function ApprovalBar({
       </section>
     );
   }
+  if (request.kind === "elicitation") {
+    return (
+      <section className="approval-bar">
+        <div className="approval-copy">
+          <strong>{request.title}</strong><p>{request.detail}</p>
+          {request.url ? <a href={request.url} target="_blank" rel="noreferrer">打开授权页面</a> : <>
+            <pre className="request-arguments">{JSON.stringify(request.requestedSchema, null, 2)}</pre>
+            <textarea aria-label="MCP 表单 JSON" value={freeText} onChange={(event) => setFreeText(event.target.value)} placeholder="输入符合上方 Schema 的 JSON" />
+          </>}
+        </div>
+        <div className="approval-actions">
+          <button className="secondary-button" onClick={() => onRespond(request, "decline")}>拒绝</button>
+          <button className="primary-button" onClick={() => onRespond({ ...request, detail: request.url ? "null" : freeText || "{}" }, "accept")}>提交</button>
+        </div>
+      </section>
+    );
+  }
   return (
     <section className="approval-bar">
       <div className="approval-icon">
@@ -710,6 +731,7 @@ function ApprovalBar({
         <p>{request.detail ?? "Codex 正在等待你的确认"}</p>
         {request.command && <code>{request.command}</code>}
         {request.cwd && <small>{request.cwd}</small>}
+        {request.permissions && <pre className="request-arguments">{JSON.stringify(request.permissions, null, 2)}</pre>}
       </div>
       <div className="approval-actions">
         <button
@@ -883,6 +905,11 @@ function App() {
   const [attachments, setAttachments] = useState<UploadAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const subscribedThreadRef = useRef<string | null>(null);
+  const selectedThreadRef = useRef(selected);
+  selectedThreadRef.current = selected;
+  const applyEventRef = useRef<(event: TimelineEvent) => void>(() => {});
+  const pendingSendRef = useRef<{ threadId: string; text: string; editing: typeof editingLastMessage } | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -911,7 +938,7 @@ function App() {
       const existing = current.items.some((item) => item.kind === "system" && item.text === message);
       const items = existing
         ? current.items
-        : [...current.items, { id: `codex-error-${turnId ?? crypto.randomUUID()}`, kind: "system" as const, createdAt: new Date().toISOString(), title: "Codex 错误", text: message, status: "failed" }];
+        : [...current.items, { id: `codex-error-${turnId ?? createCommandId()}`, kind: "system" as const, createdAt: new Date().toISOString(), title: "Codex 错误", text: message, status: "failed" }];
       const thread = markFailed
         ? { ...current.thread, status: "failed" as const, activeTurnId: undefined, canInterrupt: false, activitySource: undefined }
         : current.thread;
@@ -1040,8 +1067,10 @@ function App() {
   };
   const subscribe = useCallback((threadId: string) => {
     const current = wsRef.current;
-    if (current?.readyState === WebSocket.OPEN)
+    if (current?.readyState === WebSocket.OPEN && subscribedThreadRef.current !== threadId) {
       current.send(JSON.stringify({ type: "subscribe_thread", threadId }));
+      subscribedThreadRef.current = threadId;
+    }
   }, []);
   useEffect(() => {
     if (!authenticated) return;
@@ -1050,10 +1079,11 @@ function App() {
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const socket = new WebSocket(`${protocol}//${location.host}/ws`);
       wsRef.current = socket;
+      subscribedThreadRef.current = null;
       socket.onopen = () => {
         if (closed) return;
         setConnection("live");
-        if (selected) subscribe(selected);
+        if (selectedThreadRef.current) subscribe(selectedThreadRef.current);
       };
       socket.onclose = () => {
         if (closed) return;
@@ -1062,9 +1092,24 @@ function App() {
       };
       socket.onerror = () => setConnection("offline");
       socket.onmessage = (message) => {
-        const event = JSON.parse(message.data) as Record<string, unknown>;
+        const selected = selectedThreadRef.current;
+        let event: Record<string, unknown>;
+        try { event = JSON.parse(message.data) as Record<string, unknown>; }
+        catch { setError("收到无效的服务器消息，请重新连接"); return; }
+        if (!event || typeof event !== "object") return;
         if (event.type === "thread_snapshot") {
           const data = event.snapshot as Snapshot;
+          if (!data?.thread || !Array.isArray(data.items)) { setError("线程数据格式无效，请重新加载"); return; }
+          if (event.replacesThreadId === selected) {
+            freshThreadRef.current = data.thread.id;
+            selectedThreadRef.current = data.thread.id;
+            subscribedThreadRef.current = data.thread.id;
+            if (pendingSendRef.current) pendingSendRef.current = { ...pendingSendRef.current, threadId: data.thread.id, editing: null };
+            setThreads((items) => [data.thread, ...items.filter((thread) => thread.id !== data.thread.id)]);
+            setThreadModels((models) => models[selected!] ? { ...models, [data.thread.id]: models[selected!] } : models);
+            setSelected(data.thread.id);
+            setError("旧格式线程不支持原地回退，已创建截至上一轮的重发分支；原线程保持不变。");
+          } else if (data.thread.id !== selected) return;
           setSnapshot(data);
           setActiveTurnId(data.thread.activeTurnId ?? null);
           setRequests(data.pendingRequests ?? []);
@@ -1101,6 +1146,7 @@ function App() {
         } else if (event.type === "server_request") {
           if (typeof event.threadId === "string" && event.threadId !== selected) return;
           const request = event.request as RequestItem;
+          if (!request || request.id === undefined) return;
           setRequests((items) =>
             items.some((item) => item.id === request.id)
               ? items
@@ -1110,13 +1156,22 @@ function App() {
           const threadId =
             typeof event.threadId === "string" ? event.threadId : undefined;
           const inner = event.event as TimelineEvent;
-          if (threadId && threadId === selected) applyEvent(inner);
+          if (!threadId || threadId === selected) applyEventRef.current(inner);
+        } else if (event.type === "server_unavailable") {
+          setConnection("offline");
+          setError("Codex 服务正在重连，请稍后重试");
         } else if (event.type === "error") {
           const message = String(
             (event.error as Record<string, unknown>)?.message ?? "操作失败",
           );
           if (!event.threadId || event.threadId === selected) {
             appendTimelineError(message, typeof event.turnId === "string" ? event.turnId : undefined);
+            const pending = pendingSendRef.current;
+            if (pending?.threadId === selected) {
+              setInput(pending.text);
+              setEditingLastMessage(event.error && (event.error as Record<string, unknown>).code === "retry_failed" ? null : pending.editing);
+              pendingSendRef.current = null;
+            }
           } else {
             setError(message);
           }
@@ -1128,7 +1183,7 @@ function App() {
       closed = true;
       wsRef.current?.close();
     };
-  }, [authenticated, selected, subscribe, appendTimelineError]);
+  }, [authenticated, subscribe, appendTimelineError]);
   const applyEvent = (event: TimelineEvent) => {
     const params = event.params ?? {};
     const eventCreatedAt = event.receivedAt ?? new Date().toISOString();
@@ -1155,11 +1210,22 @@ function App() {
       }
       return;
     }
+    if (event.method === "configWarning" || event.method === "deprecationNotice") {
+      setError(typeof params.message === "string" ? params.message : "Codex 报告了配置或兼容性警告");
+      return;
+    }
+    if (event.method === "server/exit") {
+      setConnection("offline");
+      appendTimelineError("Codex app-server 已退出，请重新连接或重试发送");
+      setActiveTurnId(null);
+      return;
+    }
     if (event.method === "turn/started")
-      setActiveTurnId(eventTurnId ?? null);
+      { setActiveTurnId(eventTurnId ?? null); pendingSendRef.current = null; }
     if (event.method === "turn/completed" || event.method === "turn/interrupted" || event.method === "turn/interrupt")
       setActiveTurnId((current) => eventTurnId && current && eventTurnId !== current ? current : null);
     if (event.method === "turn/completed") {
+      setRequests([]);
       const terminalStatus = typeof turnObject?.status === "string" ? turnObject.status : "completed";
       if (terminalStatus === "failed" || terminalStatus === "systemError") {
         appendTimelineError(codexErrorText({ error: turnObject?.error }), eventTurnId);
@@ -1172,7 +1238,7 @@ function App() {
       // Ignore a late completion for an older turn so it cannot make a newer
       // queued turn appear idle.
       if (isTerminalTurnEvent && eventTurnId && currentTurnId && eventTurnId !== currentTurnId) return current;
-      const items = [...current.items];
+      let items = [...current.items];
       let changedFiles = [...(current.changedFiles ?? [])];
       let diff = current.diff;
       let plan = current.plan;
@@ -1282,7 +1348,7 @@ function App() {
                       : rawType === "userMessage"
                         ? "user"
                         : "unknown",
-          title: rawType === "commandExecution" ? "Command" : rawType === "fileChange" ? `${changes.length || 1} file change${changes.length === 1 ? "" : "s"}` : rawType === "reasoning" ? "Reasoning" : undefined,
+          title: rawType === "commandExecution" ? "Command" : rawType === "fileChange" ? `${changes.length || 1} file change${changes.length === 1 ? "" : "s"}` : rawType === "reasoning" ? "Reasoning" : typeof raw.tool === "string" ? raw.tool : typeof raw.name === "string" ? raw.name : rawType,
           text: (textFromRawItem(raw) ?? summary) || undefined,
           command: typeof raw.command === "string" ? raw.command : undefined,
           output:
@@ -1300,11 +1366,11 @@ function App() {
                 : undefined,
         };
         const mergedItems = mergeTimelineItem(items, mapped);
-        items.splice(0, items.length, ...mergedItems);
+        items = mergedItems;
         for (const change of changes) {
           if (typeof change.path !== "string") continue;
           const existing = changedFiles.find((file) => file.path === change.path);
-          const status = typeof change.kind === "string" ? change.kind : mapped.status;
+          const status = changeStatusFromRaw(change.kind) ?? mapped.status;
           if (existing) existing.status = status;
           else changedFiles.push({ path: change.path, status });
         }
@@ -1312,11 +1378,10 @@ function App() {
       } else if (event.method === "turn/diff/updated") {
         if (typeof params.diff === "string") diff = params.diff;
       } else if (event.method === "turn/plan/updated") {
-        const rawPlan = Array.isArray(params.plan) ? params.plan : [];
-        plan = rawPlan.map((step) => typeof step === "string" ? { text: step } : { text: String((step as Record<string, unknown>).text ?? ""), completed: Boolean((step as Record<string, unknown>).completed) });
+        plan = planFromRaw(params.plan);
       } else if (event.method === "thread/tokenUsage/updated") {
         const usage = params.tokenUsage;
-        if (usage && typeof usage === "object") tokenUsage = usage as Snapshot["tokenUsage"];
+        tokenUsage = tokenUsageFromRaw(usage) ?? tokenUsage;
       }
       const thread = { ...current.thread };
       if (event.method === "thread/status/changed") {
@@ -1341,6 +1406,10 @@ function App() {
         thread.activeTurnId = undefined;
         thread.canInterrupt = false;
         thread.activitySource = undefined;
+        const finalAgent = [...items].reverse().find((item) => item.kind === "agent");
+        if (terminalStatus === "completed" && finalAgent && (!finalAgent.status || finalAgent.status === "inProgress")) {
+          items = items.map((item) => item.id === finalAgent.id ? { ...item, status: "final_answer" } : item);
+        }
       }
       if (event.method === "turn/interrupted" || event.method === "turn/interrupt") {
         thread.status = "interrupted";
@@ -1351,6 +1420,7 @@ function App() {
       return { ...current, thread, items, changedFiles, diff, plan, tokenUsage };
     });
   };
+  applyEventRef.current = applyEvent;
   useEffect(() => {
     if (!selected || !authenticated) return;
     setEditingLastMessage(null);
@@ -1363,13 +1433,16 @@ function App() {
       return;
     }
     setSnapshot(null);
+    let cancelled = false;
     api<Snapshot>(`/api/threads/${encodeURIComponent(selected)}`)
       .then((value) => {
+        if (cancelled || selectedThreadRef.current !== selected) return;
         setSnapshot(value);
         setRequests(value.pendingRequests ?? []);
         subscribe(selected);
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
   }, [selected, authenticated, subscribe, clearAttachments]);
   useEffect(() => {
     const frame = requestAnimationFrame(updateMessageNavigation);
@@ -1466,6 +1539,8 @@ function App() {
       return;
     }
     setBusy(true);
+    setError("");
+    pendingSendRef.current = { threadId: selected, text, editing: editingLastMessage };
     setInput("");
     const outgoingAttachments = attachments.map(({ previewUrl: _previewUrl, ...attachment }) => attachment);
     const actionType = editingLastMessage
@@ -1534,30 +1609,10 @@ function App() {
     setNewThreadOpen(false);
   };
   const respond = async (request: RequestItem, decision: string) => {
-    let response: Record<string, unknown> = { decision };
-    if (decision === "unsupported" && request.kind === "tool_call") {
-      response = {
-        success: false,
-        contentItems: [{ type: "inputText", text: "该动态工具未在 Codex Console 中配置。请继续完成当前消息。" }],
-      };
-    }
-    if (decision === "answer") {
-      try {
-        const parsed = JSON.parse(request.detail ?? "{}");
-        const answers = parsed.answers as Record<string, string>;
-        response = {
-          answers: Object.fromEntries(
-            Object.entries(answers).map(([key, value]) => [
-              key,
-              { answers: [value] },
-            ]),
-          ),
-        };
-      } catch {
-        response = { answers: {} };
-      }
-    } else if (decision === "skip" && request.kind === "user_input")
-      response = { answers: {} };
+    let response: Record<string, unknown>;
+    try { response = responseForRequest(request, decision); }
+    catch { setError("请输入有效的 JSON 回答"); return; }
+    if (wsRef.current?.readyState !== WebSocket.OPEN) { setError("连接已断开，请稍后重试"); return; }
     wsRef.current?.send(
       JSON.stringify({
         type: "respond_request",
@@ -1776,7 +1831,7 @@ function App() {
           </button>
         )}
         {requests[0] && (
-          <ApprovalBar request={requests[0]} onRespond={respond} />
+          <ApprovalBar key={requests[0].id} request={requests[0]} onRespond={respond} />
         )}
         <div className="composer-wrap">
           <div className="composer">
@@ -1965,7 +2020,7 @@ function App() {
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary><App /></ErrorBoundary>
   </React.StrictMode>,
 );
 
