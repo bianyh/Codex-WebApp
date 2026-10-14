@@ -3,6 +3,7 @@ import { chmod, cp, mkdir, readFile, realpath, rename, stat, symlink, writeFile 
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { artifactFingerprint, validateBuildManifest } from "./build-manifest.mjs";
 
 export function isIdleHealth(response) {
   const state = response?.data;
@@ -53,11 +54,13 @@ async function deploy() {
   const configDir = path.join(homedir(), ".config/codex-console");
   const unitPath = path.join(homedir(), ".config/systemd/user", service);
   const environmentPath = path.join(configDir, "environment");
-  if (await run("git", ["status", "--porcelain"])) throw new Error("Commit or save repository changes before scheduling deployment");
-  const revision = await run("git", ["rev-parse", "--short=12", "HEAD"]);
+  const snapshot = process.env.CODEX_CONSOLE_DEPLOY_SNAPSHOT === "1";
+  if (!snapshot && await run("git", ["status", "--porcelain"])) throw new Error("Commit repository changes or explicitly deploy a validated build snapshot");
+  const revision = snapshot ? await validateBuildManifest(buildDir, repo) : await run("git", ["rev-parse", "--short=12", "HEAD"]);
   const suffix = new Date().toISOString().replace(/[:.]/g, "-");
   const release = path.join(stateDir, "releases", `${suffix}-${revision}`);
   await prepareRelease(buildDir, release, repo);
+  if (snapshot && await artifactFingerprint(buildDir) !== await artifactFingerprint(release)) throw new Error("Release artifacts do not match validated snapshot");
   const unitTemplate = await readFile(path.join(repo, "deploy/codex-console.service"), "utf8");
   const environment = await readFile(environmentPath, "utf8");
   const originalUnit = await readFile(unitPath, "utf8");

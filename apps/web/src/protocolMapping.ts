@@ -1,4 +1,5 @@
 import type { Snapshot } from "./types";
+import { mapTokenUsage } from "../../daemon/src/runtimeMapping";
 
 export function planFromRaw(value: unknown): NonNullable<Snapshot["plan"]> {
   if (!Array.isArray(value)) return [];
@@ -12,15 +13,7 @@ export function planFromRaw(value: unknown): NonNullable<Snapshot["plan"]> {
 }
 
 export function tokenUsageFromRaw(value: unknown): Snapshot["tokenUsage"] {
-  if (!value || typeof value !== "object") return undefined;
-  const usage = value as Record<string, unknown>;
-  const totals = usage.total && typeof usage.total === "object" ? usage.total as Record<string, unknown> : usage;
-  const number = (candidate: unknown): number | undefined => typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined;
-  return {
-    input: number(totals.inputTokens ?? totals.input),
-    output: number(totals.outputTokens ?? totals.output),
-    total: number(totals.totalTokens ?? totals.total),
-  };
+  return mapTokenUsage(value);
 }
 
 export function changeStatusFromRaw(value: unknown): string | undefined {

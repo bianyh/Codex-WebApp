@@ -38,4 +38,10 @@ describe("optimistic user messages", () => {
     const afterSecond = mergeTimelineItem(afterFirst, { id: "server-2", kind: "user", text: "same text" });
     expect(afterSecond.map((item) => item.id)).toEqual(["server-1", "server-2"]);
   });
+  it("clears pending queue identity when the canonical dispatched user item arrives", () => {
+    const queued = { ...createOptimisticUserItem("queued text"), queueId: "queued-id" };
+    const merged = mergeTimelineItem([queued], { id: "canonical", kind: "user", text: "queued text" });
+    expect(merged[0]).toMatchObject({ id: "canonical", text: "queued text" });
+    expect(merged[0]?.queueId).toBeUndefined();
+  });
 });

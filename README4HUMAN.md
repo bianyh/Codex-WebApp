@@ -188,6 +188,25 @@ Releases, configuration backups, and the final `result.json` are stored under `~
 
 Codex 0.162.1 uses `thread/revert` for paginated conversation history. Legacy histories cannot be reverted in place: editing the latest message creates a branch through the previous turn (or a new thread when editing the first turn), then sends the revised message there. The original legacy thread is preserved and the UI switches to the replacement automatically. Conversation rollback never reverts files already edited by Codex.
 
+## Goal controls
+
+Use the target icon in the conversation header or the **Goal** context tab. An existing goal appears in a banner above the conversation, with its objective and current lifecycle state. The panel shows token usage, optional budget, and elapsed goal time, and provides an on/off switch, pause/resume, edit, and confirmed delete.
+
+Turning the switch off pauses the goal and retains its objective. New goals are saved paused unless **enable immediately** is explicitly checked. Editing content or budget alone does not resume a paused goal. Clearing a goal removes that goal, not the conversation or files. Enabling/resuming a goal can immediately start automated work. Goal status is distinct from Turn status; use the composer stop button to interrupt the currently running message.
+
+Goals in another CLI/app-server process are refreshed with read-only polling and remain visible. Codex's active-writer lock can prevent changes: the UI explains the read-only state and never closes the original CLI to force a goal update. Once the original writer exits, reopen the thread in the console to acquire control. Unsupported goal APIs show a disabled explanation instead of breaking messages.
+
+## Conversation controls and runtime visibility
+
+- **Queue**: the context panel shows pending console instructions, their model/settings and attachments. Edit text without discarding attachments, cancel entries, or move them up/down. This is the daemon's in-memory queue, not another CLI process's native queue; it is not persisted across restarts. Mutations serialize with delivery, and stale reorder requests are rejected.
+- **Next-turn execution settings**: click the compact settings button beside the model in the composer toolbar. A themed popover lets you select model-supported reasoning effort, service tier and native plan/execution mode without adding an extra composer row. The button summarizes overrides; reset returns to inherited Codex settings. Settings follow queued messages and normal resend. An instruction steering a running Turn does not change that Turn's settings. Custom providers may reject unsupported values. No API keys are configured in the browser.
+- **Usage**: cumulative thread tokens are separate from the last-turn context-pressure estimate. Cached input, reasoning output and model context capacity appear when Codex reports them. The panel also shows effective model, provider, effort, speed, mode, approval and sandbox settings, including model rerouting. Unknown values are explicitly unavailable. A confirmed context-compaction action is available only when the thread is idle, controlled locally and has no pending queue; it does not undo files.
+- **Thread actions**: the header's ellipsis button renames, forks or archives the selected conversation. Forking copies current history into a new thread, without rolling back files or changing the source thread. The drawer switches between recent and archived lists, supports server-side title search and loads further pages. Archived conversations remain archived when opened; restore them before sending messages.
+- **Structured results**: sub-agent calls link to their threads and show returned state/messages; search results use safe HTTP(S) links; image cards use authenticated local file access or raster data. Reviews, waits and compaction have explicit cards. Commands show exit code and execution duration; tool durations appear when available. Execution groups remain collapsible and the timeline stays bounded.
+- **Status**: the read-only panel shows account quota windows/reset times, MCP readiness/tool counts, Skills, installed plugins and Hooks. It refreshes once per minute while visible, with a manual refresh button. Unsupported quota/API inventory data is not inferred as unlimited usage. Backend denial of ordinary usage remains visible even if percentages appear low. No login, installation, OAuth or configuration mutation happens from this panel, and credentials/raw hook commands are not shown.
+
+Capabilities and remaining protocol boundaries are documented in [docs/FRONTEND_CAPABILITY_AUDIT.md](docs/FRONTEND_CAPABILITY_AUDIT.md).
+
 ## Troubleshooting
 
 Check the local health endpoint first:

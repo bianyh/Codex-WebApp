@@ -57,7 +57,8 @@ export function mergeTimelineItem(items: Item[], incoming: Item): Item[] {
       next[optimisticIndex] = {
         ...items[optimisticIndex],
         ...incoming,
-        text: incoming.text || items[optimisticIndex].text,
+        text: incoming.text || items[optimisticIndex]!.text,
+        queueId: undefined,
       };
       return next;
     }

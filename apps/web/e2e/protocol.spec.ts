@@ -12,7 +12,7 @@ async function openConsole(page: Page, onSend: (action: Record<string, unknown>,
   await page.route(`${origin}/**`, async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname.startsWith("/api/")) {
-      const data = pathname === "/api/auth/me" ? { authenticated: true } : pathname === "/api/threads" ? [thread] : pathname.startsWith("/api/threads/") ? snapshot : pathname === "/api/models" ? [] : pathname === "/api/fs/list" ? { path: "/tmp", root: "/tmp", parent: null, entries: [] } : [];
+      const data = pathname === "/api/auth/me" ? { authenticated: true } : pathname === "/api/threads" ? [thread] : pathname.endsWith("/goal") ? { goal: null, supported: true, canControl: true } : pathname.startsWith("/api/threads/") ? snapshot : pathname === "/api/models" ? [] : pathname === "/api/fs/list" ? { path: "/tmp", root: "/tmp", parent: null, entries: [] } : [];
       await route.fulfill({ json: { ok: true, data } });
       return;
     }
@@ -85,7 +85,7 @@ test("current plan, nested token usage and structured file changes render safely
   await expect(page.locator(".context-desktop .plan-step")).toContainText("Inspect protocol");
   await expect(page.locator(".context-desktop .step-check")).toHaveClass(/completed/);
   await page.locator(".context-desktop").getByRole("button", { name: "Usage", exact: true }).click();
-  await expect(page.locator(".context-desktop .usage-total")).toContainText("150");
+  await expect(page.locator(".context-desktop .usage-row").filter({ hasText: "总量" })).toContainText("150");
   await page.locator(".context-desktop").getByRole("button", { name: "Files", exact: true }).click();
   await expect(page.locator(".app-shell")).toBeVisible();
   expect(errors).toEqual([]);

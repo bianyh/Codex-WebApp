@@ -13,12 +13,15 @@ const root = await mkdtemp(path.join(tmpdir(), "codex-console-smoke-"));
 const home = path.join(root, "codex");
 await mkdir(home);
 let requests = 0;
+let nextProviderDelay = 0;
 const provider = createServer(async (request, response) => {
   if (!request.url.endsWith("/responses")) {
     response.writeHead(404).end();
     return;
   }
   for await (const _chunk of request) {}
+  const providerDelay = nextProviderDelay; nextProviderDelay = 0;
+  if (providerDelay) await new Promise((resolve) => setTimeout(resolve, providerDelay));
   requests += 1;
   const id = `resp_smoke_${requests}`;
   const message = { id: `msg_${requests}`, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: `Smoke reply ${requests}`, annotations: [] }] };
@@ -73,9 +76,30 @@ async function completeTurn(threadId) {
   throw new Error("Turn did not complete");
 }
 try {
-  const handshake = await rpc("initialize", { clientInfo: { name: "codex_console_smoke", version: "0.1.0" } });
+  const handshake = await rpc("initialize", { clientInfo: { name: "codex_console_smoke", version: "0.1.0" }, capabilities: { experimentalApi: true } });
   child.stdin.write(JSON.stringify({ method: "initialized", params: {} }) + "\n");
   const { thread } = await rpc("thread/start", { cwd: root, approvalPolicy: "never", sandbox: "read-only" });
+  const goalThread = await rpc("thread/start", { cwd: root, approvalPolicy: "never", sandbox: "read-only" });
+  const pausedGoal = await rpc("thread/goal/set", { threadId: goalThread.thread.id, origin: "user", objective: "Goal protocol smoke", status: "paused", tokenBudget: 1000 });
+  assert.equal(pausedGoal.goal.status, "paused");
+  const loadedGoal = await rpc("thread/goal/get", { threadId: goalThread.thread.id });
+  assert.equal(loadedGoal.goal.objective, "Goal protocol smoke");
+  process.env.CODEX_HOME = home;
+  process.env.CODEX_CWD = root;
+  const { CodexProcess: GoalObserver } = await import("../apps/daemon/src/codex.ts");
+  adapter = new GoalObserver();
+  await adapter.start();
+  console.log("Cross-process goal get:", (await adapter.request("thread/goal/get", { threadId: goalThread.thread.id })).goal?.status);
+  try {
+    const edited = await adapter.request("thread/goal/set", { threadId: goalThread.thread.id, origin: "user", objective: "Cross-process edited goal", status: "paused" });
+    console.log("Cross-process goal edit:", edited.goal?.status);
+  } catch (error) { console.log("Cross-process mutation:", error.message); }
+  await adapter.stop();
+  await rpc("thread/goal/set", { threadId: goalThread.thread.id, origin: "user", status: "active" });
+  await rpc("thread/goal/set", { threadId: goalThread.thread.id, origin: "user", status: "paused" });
+  await rpc("thread/goal/clear", { threadId: goalThread.thread.id, origin: "user" });
+  assert.equal((await rpc("thread/goal/get", { threadId: goalThread.thread.id })).goal, null);
+  console.log("Goal protocol get/set/pause/resume/clear: passed");
   await completeTurn(thread.id);
   const lastTurnId = await completeTurn(thread.id);
   await rpc("thread/revert", { threadId: thread.id, beforeTurnId: lastTurnId });
@@ -164,6 +188,71 @@ try {
   const loggedIn = await fetch(`${base}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }) });
   assert.equal(loggedIn.status, 200);
   const cookie = loggedIn.headers.get("set-cookie").split(";")[0];
+  const http = async (url, method = "GET", body) => {
+    const response = await fetch(`${base}${url}`, { method, headers: { cookie, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const result = await response.json();
+    assert.equal(response.ok, true, `${url}: ${result.error?.message}`);
+    return result.data;
+  };
+  const control = await http("/api/threads", "POST", { cwd: root, model: "smoke-model", approvalPolicy: "never", sandbox: "read-only" });
+  const controlId = control.thread.id;
+  const controlEvents = [];
+  const controlSocket = new WebSocket(`${base.replace("http", "ws")}/ws`, { headers: { cookie, origin: base } });
+  controlSocket.on("message", (raw) => controlEvents.push(JSON.parse(String(raw))));
+  await new Promise((resolve, reject) => { controlSocket.once("open", resolve); controlSocket.once("error", reject); });
+  controlSocket.send(JSON.stringify({ type: "subscribe_thread", threadId: controlId }));
+  const until = async (predicate, label) => { for (let attempt = 0; attempt < 400; attempt += 1) { const result = predicate(); if (result) return result; await new Promise((resolve) => setTimeout(resolve, 50)); } throw new Error(`Timeout: ${label}`); };
+  await until(() => controlEvents.some((event) => event.type === "thread_snapshot"), "subscription");
+  const controlSend = (action) => controlSocket.send(JSON.stringify({ threadId: controlId, ...action }));
+  nextProviderDelay = 3000;
+  controlSend({ type: "start_turn", text: "Queue blocker", model: "smoke-model", effort: "high", serviceTier: "default", mode: "plan" });
+  await until(() => controlEvents.some((event) => event.event?.method === "turn/started"), "plan turn start");
+  assert.equal((await fetch(`${base}/api/threads/${controlId}/compact`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: "{}" })).status, 409);
+  const attachmentPath = path.join(dataDir, "uploads", "queue-note.txt");
+  await mkdir(path.dirname(attachmentPath), { recursive: true });
+  await writeFile(attachmentPath, "Attachment retained");
+  controlSend({ type: "queue_turn", text: "First queued", model: "smoke-model", effort: "medium", mode: "default", attachments: [{ name: "queue-note.txt", path: attachmentPath, mime: "text/plain" }] });
+  controlSend({ type: "queue_turn", text: "Second queued", model: "smoke-model" });
+  await until(() => controlEvents.some((event) => event.type === "turn_queue_state" && event.queue?.length === 2), "queue entries");
+  const queueUrl = `/api/threads/${controlId}/queue`;
+  let queue = await http(queueUrl);
+  assert.equal(queue.length, 2);
+  queue = await http(queueUrl, "PATCH", { action: "edit", id: queue[0].id, text: "Edited queued" });
+  assert.equal(queue[0].attachments[0].path, attachmentPath);
+  assert.equal(queue[0].effort, "medium");
+  assert.equal(queue[0].mode, "default");
+  queue = await http(queueUrl, "PATCH", { action: "reorder", ids: [queue[1].id, queue[0].id] });
+  assert.equal(queue[0].text, "Second queued");
+  const staleQueue = await fetch(`${base}${queueUrl}`, { method: "PATCH", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ action: "reorder", ids: ["missing"] }) });
+  assert.equal(staleQueue.status, 409);
+  for (const entry of queue) await http(queueUrl, "PATCH", { action: "delete", id: entry.id });
+  assert.equal((await http(queueUrl)).length, 0);
+  const firstComplete = await until(() => controlEvents.find((event) => event.event?.method === "turn/completed"), "plan turn completion");
+  assert.equal(firstComplete.event.params.turn.status, "completed");
+  assert.ok(controlEvents.some((event) => event.event?.method === "thread/settings/updated" && event.event.params.threadSettings.collaborationMode.mode === "plan"));
+  controlSend({ type: "queue_turn", text: "Drain with saved settings", model: "smoke-model", effort: "medium", mode: "default", serviceTier: "default" });
+  await until(() => controlEvents.filter((event) => event.event?.method === "turn/completed").length === 2, "queue drain");
+  assert.equal((await http(queueUrl)).length, 0);
+  assert.ok(controlEvents.some((event) => event.event?.method === "thread/settings/updated" && event.event.params.threadSettings.collaborationMode.mode === "default"));
+  await http(`/api/threads/${controlId}/name`, "PATCH", { name: "Native capability smoke" });
+  const page = await http("/api/threads?page=true&search=Native%20capability");
+  assert.ok(page.threads.some((entry) => entry.id === controlId));
+  const fork = await http(`/api/threads/${controlId}/fork`, "POST", {});
+  assert.notEqual(fork.thread.id, controlId);
+  await http(`/api/threads/${fork.thread.id}/archive`, "POST", {});
+  const archived = await http("/api/threads?page=true&archived=true");
+  assert.ok(archived.threads.some((entry) => entry.id === fork.thread.id));
+  await http(`/api/threads/${fork.thread.id}`);
+  assert.ok((await http("/api/threads?page=true&archived=true")).threads.some((entry) => entry.id === fork.thread.id), "Opening an archive must not implicitly restore it");
+  await http(`/api/threads/${fork.thread.id}/unarchive`, "POST", {});
+  const status = await http(`/api/runtime/status?threadId=${controlId}`);
+  assert.ok(status.skills.available);
+  for (const key of ["quotas", "mcp", "skills", "plugins", "hooks"]) assert.equal(typeof status[key].available, "boolean");
+  for (const endpoint of [`/api/threads/${controlId}/queue`, `/api/runtime/status?threadId=${controlId}`]) assert.equal((await fetch(`${base}${endpoint}`)).status, 401);
+  await http(`/api/threads/${controlId}/compact`, "POST", {});
+  await until(() => controlEvents.some((event) => event.event?.method === "item/completed" && event.event.params.item?.type === "contextCompaction") || controlEvents.some((event) => event.event?.method === "thread/compacted"), "context compaction");
+  controlSocket.close();
+  console.log("Native plan settings, queue edit/reorder/delete, attachments, thread management, inventories and context compaction: passed");
   for (const targetId of [thread.id, legacyId]) {
     const loaded = await fetch(`${base}/api/threads/${targetId}`, { headers: { cookie } });
     assert.equal(loaded.status, 200);
@@ -183,6 +272,42 @@ try {
     socket.close();
   }
   console.log("Authenticated daemon WebSocket rollback/resend: paginated and legacy passed");
+  const goalUrl = `${base}/api/threads/${thread.id}/goal`;
+  assert.equal((await fetch(goalUrl)).status, 401);
+  assert.equal((await fetch(goalUrl, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ objective: "Unauthorized" }) })).status, 401);
+  assert.equal((await fetch(goalUrl, { method: "DELETE" })).status, 401);
+  const patchGoal = async (body) => {
+    const response = await fetch(goalUrl, { method: "PATCH", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body) });
+    const result = await response.json();
+    assert.equal(response.status, 200, result.error?.message);
+    return result.data;
+  };
+  assert.equal((await patchGoal({ objective: "HTTP goal test", tokenBudget: 1000 })).goal.status, "paused");
+  assert.equal((await (await fetch(goalUrl, { headers: { cookie } })).json()).data.goal.objective, "HTTP goal test");
+  assert.equal((await patchGoal({ objective: "Edited HTTP goal", tokenBudget: 2000 })).goal.status, "paused");
+  assert.equal((await patchGoal({ tokenBudget: null })).goal.tokenBudget, null);
+  await patchGoal({ status: "active" });
+  await patchGoal({ status: "paused" });
+  assert.equal((await fetch(goalUrl, { method: "DELETE", headers: { cookie } })).status, 200);
+  assert.equal((await (await fetch(goalUrl, { headers: { cookie } })).json()).data.goal, null);
+  const invalid = await fetch(goalUrl, { method: "PATCH", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ status: "complete" }) });
+  assert.equal(invalid.status, 400);
+  const ownedGoal = await patchGoal({ objective: "Persistent goal", status: "paused", tokenBudget: 4000 });
+  assert.equal(ownedGoal.goal.status, "paused");
+  const socket = new WebSocket(`${base.replace("http", "ws")}/ws`, { headers: { cookie, origin: base } });
+  const goalEvents = [];
+  socket.on("message", (raw) => goalEvents.push(JSON.parse(String(raw))));
+  await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+  socket.send(JSON.stringify({ type: "subscribe_thread", threadId: thread.id }));
+  for (let attempt = 0; attempt < 100 && !goalEvents.some((event) => event.type === "thread_snapshot"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(goalEvents.find((event) => event.type === "thread_snapshot")?.snapshot.goalState?.goal.objective, "Persistent goal");
+  await patchGoal({ objective: "Live goal update" });
+  for (let attempt = 0; attempt < 100 && !goalEvents.some((event) => event.type === "goal_state"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(goalEvents.some((event) => event.type === "goal_state" && event.state.goal.objective === "Live goal update"));
+  const finalGoalClear = await fetch(goalUrl, { method: "DELETE", headers: { cookie } });
+  assert.equal(finalGoalClear.status, 200);
+  socket.close();
+  console.log("Authenticated goal HTTP lifecycle and access control: passed");
 } catch (error) {
   console.error(error.stack);
   if (stderr) console.error(stderr.slice(-2000));

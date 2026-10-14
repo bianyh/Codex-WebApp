@@ -173,11 +173,15 @@ systemctl --user restart codex-console.service
 
 ### 等待空闲后自动部署
 
+仅前端修复可先运行 `CODEX_CONSOLE_BUILD_DIR=/validated/staged/build npm run deploy:web`，避免中断活动对话。脚本要求源码/构建指纹匹配且 staged daemon 与运行 release 的 daemon 字节完全一致；只添加新静态资产、原子替换 `index.html`，保留旧 hash 资产并备份旧入口，验证实际 HTTP 的 HTML/JS/CSS 和服务 PID 未变化。改变 daemon、服务工作者或现有同名资产时拒绝热发布，必须走下面的空闲完整部署。前端发布结果写到机器本地 deployment 目录的 `web-result.json`；健康接口 `buildRevision` 仍描述运行 daemon，之后可空闲切换完整 release 统一版本。
+
 有活动任务时不能覆盖运行中的构建文件或立即重启。先创建仓库外的独立构建目录，设置 `CODEX_CONSOLE_BUILD_DIR` 后执行 `npm run build`、`npm test` 和 `npm run test:e2e`。验证通过并提交后，以当前用户的独立 `systemd-run --user` 服务执行 `npm run deploy:when-idle`，传入同一个构建目录；可设置 `CODEX_CONSOLE_EXPECTED_VERSION` 验证实际 Codex 版本。
 
 脚本准备独立 release 后，每 5 秒检查健康接口，连续 6 次确认空闲才更新自启动单元并重启。无法读取健康状态、Codex 未就绪、活动对话未结束时继续等待。新服务健康接口还提供命令、排队消息、审批和 Turn 操作计数，部署会一并等待这些工作结束。首次从旧服务升级时只拥有旧健康接口的对话计数，安排部署期间不要新开命令或新发消息。
 
 已验证版本保存于 `~/.local/state/codex-console/deployment/releases`，当前版本由 `current` 链接指向。配置备份和部署结果也保存在此目录，权限限制为当前用户；不会保存密码明文。重启后健康检查失败会恢复原服务配置。此脚本不提交或推送代码，也不修改 Codex 凭据。
+
+若用户只要求部署、未要求 Git 提交，可显式设置 `CODEX_CONSOLE_DEPLOY_SNAPSHOT=1`，部署已验证的工作树快照。仓库外构建自动生成 `build-manifest.json`，记录源码指纹、构建产物指纹和基础提交；部署前验证两类指纹一致，源码或产物变动必须重新构建和验证。线上版本格式为 `<baseRevision>-snapshot-<sourceFingerprint>`，不会将未提交版本伪装为 Git HEAD。快照一旦复制为独立 release，等待期间不依赖后续工作树修改。仍需通过连续空闲检查和新版本健康验证；压缩期间计入 `turnOperations`，不抢占重启。
 
 ## 必须向用户确认的情况
 

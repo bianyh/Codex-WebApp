@@ -2,8 +2,29 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 describe("deferred deployment", () => {
+  it("validates uncommitted source snapshots and detects artifact or source drift", async () => {
+    const { artifactFingerprint, sourceFingerprint, validateBuildManifest } = await import("./build-manifest.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "codex-manifest-test-"));
+    try {
+      await promisify(execFile)("git", ["init", "-q", root]);
+      await writeFile(path.join(root, "source.ts"), "original");
+      const build = path.join(root, "build");
+      await writeFile(path.join(root, ".gitignore"), "build/\n");
+      for (const directory of ["dist/web", "apps/daemon/dist"]) { await mkdir(path.join(build, directory), { recursive: true }); await writeFile(path.join(build, directory, "artifact"), "compiled"); }
+      const manifest = { baseRevision: "0123456789ab", sourceFingerprint: await sourceFingerprint(root), artifactFingerprint: await artifactFingerprint(build) };
+      await writeFile(path.join(build, "build-manifest.json"), JSON.stringify(manifest));
+      expect(await validateBuildManifest(build, root)).toBe(`0123456789ab-snapshot-${manifest.sourceFingerprint.slice(0, 12)}`);
+      await writeFile(path.join(build, "dist/web/artifact"), "modified");
+      await expect(validateBuildManifest(build, root)).rejects.toThrow("artifacts changed");
+      await writeFile(path.join(build, "dist/web/artifact"), "compiled");
+      await writeFile(path.join(root, "source.ts"), "changed");
+      await expect(validateBuildManifest(build, root)).rejects.toThrow("Source changed");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it("creates a release without a preexisting copy target or overwriting another release", async () => {
     const { prepareRelease } = await import("./deploy-when-idle.mjs");
     const root = await mkdtemp(path.join(tmpdir(), "codex-release-test-"));

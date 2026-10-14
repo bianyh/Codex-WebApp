@@ -16,8 +16,8 @@ function run(args) {
 }
 
 try {
-  await run(["app-server", "generate-ts", "--out", staged]);
-  await run(["app-server", "generate-json-schema", "--out", `${staged}/schema`]);
+  await run(["app-server", "generate-ts", "--experimental", "--out", staged]);
+  await run(["app-server", "generate-json-schema", "--experimental", "--out", `${staged}/schema`]);
   const version = await new Promise((resolve, reject) => {
     const child = spawn(command, ["--version"]);
     let value = "";
@@ -25,7 +25,7 @@ try {
     child.on("error", reject);
     child.on("exit", (code) => code === 0 ? resolve(value.trim()) : reject(new Error(`codex exited with ${code}`)));
   });
-  await writeFile(`${staged}/metadata.json`, JSON.stringify({ codexVersion: version, generatedAt: new Date().toISOString() }, null, 2) + "\n");
+  await writeFile(`${staged}/metadata.json`, JSON.stringify({ codexVersion: version, experimentalApi: true, generatedAt: new Date().toISOString() }, null, 2) + "\n");
   const previous = `${staged}-previous`;
   let replaced = false;
   try { await rename(output, previous); replaced = true; }

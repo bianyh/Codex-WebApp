@@ -14,8 +14,10 @@
     "codex:schema": "node scripts/generate-codex-schema.mjs",
     "codex:smoke": "node --import tsx scripts/codex-smoke.mjs",
     "deploy:when-idle": "node scripts/deploy-when-idle.mjs",
+    "deploy:web": "node scripts/deploy-web.mjs",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "typecheck": "tsc -p apps/web/tsconfig.json && tsc -p apps/daemon/tsconfig.json --noEmit"
   },
   "dependencies": {
     "@fastify/cookie": "^10.0.1",

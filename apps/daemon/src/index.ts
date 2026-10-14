@@ -12,12 +12,16 @@ import { z } from "zod";
 import { allowedOrigin, config } from "./config.js";
 import { loadState, getCustomModels, getState, persistState, setCustomModels } from "./state.js";
 import { authenticated, login, logout, requireAuth, setPassword } from "./auth.js";
-import { CodexProcess, errorTextFromRaw, itemFromRaw, planFromRaw, statusFromRaw, tokenUsageFromRaw } from "./codex.js";
+import { CodexProcess, errorTextFromRaw, itemFromRaw, planFromRaw, statusFromRaw, summaryFromRaw, tokenUsageFromRaw } from "./codex.js";
+import { goalFromRaw, goalUnsupported, goalUpdateSchema } from "./goal.js";
+import { executionSettingsSchema } from "./executionSettings.js";
+import { inventoryFromRaw, quotasFromRaw, runtimeSettingsFromRaw } from "./runtimeMapping.js";
+import type { ExecutionSettings, QueueEntry, RuntimeInventory } from "./types.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import { ThreadActivityTracker, type ThreadActivity } from "./threadActivity.js";
 import { runWorkspaceCommand } from "./workspaceCommand.js";
 import { resolveServerDirectory, resolveServerPath } from "./serverDirectory.js";
-import type { ConsoleEvent, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
+import type { ConsoleEvent, GoalState, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
 
 const daemon = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
 const codex = new CodexProcess();
@@ -27,10 +31,13 @@ const snapshots = new Map<string, ThreadSnapshot>();
 const knownThreads = new Map<string, ThreadSummary>();
 const lastActivities = new Map<string, ThreadActivity>();
 const subscriptions = new Map<WebSocket, string>();
+const goalStates = new Map<string, GoalState>();
+const activeCompactions = new Set<string>();
+const archivedIds = new Set<string>();
 const externalCodex = new ExternalCodexController({
   isIgnoredPid: (pid) => pid === codex.pid,
 });
-type QueuedTurn = TurnInput & { id: string; model?: string };
+type QueuedTurn = QueueEntry;
 const queuedTurns = new Map<string, QueuedTurn[]>();
 const drainingQueues = new Set<string>();
 const turnOperations = new Map<string, Promise<void>>();
@@ -57,7 +64,21 @@ function publicThread(thread: ThreadSummary): ThreadSummary {
 }
 
 function publicSnapshot(snapshot: ThreadSnapshot): ThreadSnapshot {
-  return { ...snapshot, thread: publicThread(snapshot.thread), pendingRequests: codex.getPendingRequests(snapshot.thread.id) };
+  return { ...snapshot, compaction: activeCompactions.has(snapshot.thread.id) ? "running" : snapshot.compaction, thread: publicThread(snapshot.thread), pendingRequests: codex.getPendingRequests(snapshot.thread.id), goalState: goalStates.get(snapshot.thread.id) };
+}
+
+async function readGoalState(threadId: string): Promise<GoalState> {
+  if (!knownThreads.has(threadId)) {
+    const result = await codex.request("thread/read", { threadId, includeTurns: false }) as { thread: unknown };
+    const thread = summaryFromRaw(result.thread);
+    if (!thread.id || thread.id !== threadId) throw new Error("线程不存在");
+    knownThreads.set(threadId, thread);
+  }
+  const canControl = codex.controlsThread(threadId);
+  const goal = await codex.getGoal(threadId);
+  const state: GoalState = { goal, supported: true, canControl, controlReason: canControl ? undefined : "此线程由其他 Codex 窗口持有，或尚未由控制台接管。请在原窗口暂停/退出后重新打开线程；控制台不会强制关闭它。" };
+  goalStates.set(threadId, state);
+  return state;
 }
 
 function sendSocket(socket: WebSocket, payload: unknown): void {
@@ -97,10 +118,14 @@ function mergeModels(official: ModelOption[]): ModelOption[] {
   return result;
 }
 
-function queueTurn(threadId: string, input: TurnInput, model?: string): string {
+function queueState(threadId: string): void {
+  broadcast({ type: "turn_queue_state", threadId, queue: queuedTurns.get(threadId) ?? [] }, threadId);
+}
+function queueTurn(threadId: string, input: TurnInput, settings: ExecutionSettings = {}): string {
   const id = randomUUID();
   const queue = queuedTurns.get(threadId) ?? [];
-  queue.push({ id, ...input, model });
+  if (queue.length >= 1000) throw new Error("此线程排队指令已达到上限，请先处理队列");
+  queue.push({ id, ...input, ...settings, createdAt: new Date().toISOString() });
   queuedTurns.set(threadId, queue);
   broadcast(
     {
@@ -113,6 +138,7 @@ function queueTurn(threadId: string, input: TurnInput, model?: string): string {
     },
     threadId,
   );
+  queueState(threadId);
   return id;
 }
 
@@ -195,12 +221,16 @@ async function takeControl(thread: ThreadSummary): Promise<boolean> {
 
 async function drainQueuedTurns(threadId: string): Promise<void> {
   if (drainingQueues.has(threadId)) return;
+  drainingQueues.add(threadId);
+  try { await serializeTurnOperation(threadId, () => drainQueuedTurnsLocked(threadId)); }
+  finally { drainingQueues.delete(threadId); }
+}
+async function drainQueuedTurnsLocked(threadId: string): Promise<void> {
   const queue = queuedTurns.get(threadId);
   const thread = knownThreads.get(threadId);
   if (!queue?.length || !thread) return;
   const activity = await activityTracker.inspect(thread);
-  if (isTurnActiveStatus(activity.status)) return;
-  drainingQueues.add(threadId);
+  if (isTurnActiveStatus(activity.status) || activeCompactions.has(threadId)) return;
   try {
     if (!(await takeControl(thread))) return;
     const next = queue[0];
@@ -208,8 +238,9 @@ async function drainQueuedTurns(threadId: string): Promise<void> {
     await codex.startTurn(
       threadId,
       { text: next.text, attachments: next.attachments },
-      { model: next.model },
+      { model: next.model, effort: next.effort, serviceTier: next.serviceTier, mode: next.mode },
     );
+    queueState(threadId);
     queue.shift();
     if (queue.length === 0) queuedTurns.delete(threadId);
     else queuedTurns.set(threadId, queue);
@@ -237,8 +268,6 @@ async function drainQueuedTurns(threadId: string): Promise<void> {
       },
       threadId,
     );
-  } finally {
-    drainingQueues.delete(threadId);
   }
 }
 
@@ -265,11 +294,23 @@ function pushEvent(event: ConsoleEvent): void {
 }
 
 function updateSnapshot(event: ConsoleEvent): void {
+  if (event.sourceMethod === "server/exit") activeCompactions.clear();
   if (!event.threadId) return;
+  if (event.sourceMethod === "thread/goal/updated" || event.sourceMethod === "thread/goal/cleared") {
+    const previous = goalStates.get(event.threadId);
+    try {
+      const goal = event.sourceMethod === "thread/goal/cleared" ? null : goalFromRaw(event.event.goal, event.threadId);
+      goalStates.set(event.threadId, { ...previous, goal, supported: true, canControl: codex.controlsThread(event.threadId) });
+    } catch { daemon.log.warn("忽略无效的 Codex 目标通知"); }
+  }
   const snapshot = snapshots.get(event.threadId);
   if (!snapshot) return;
   const params = event.event;
   const method = event.sourceMethod;
+  if (method === "thread/settings/updated") snapshot.thread.runtimeSettings = runtimeSettingsFromRaw(params.threadSettings);
+  if (method === "model/rerouted") snapshot.thread.runtimeSettings = { ...snapshot.thread.runtimeSettings, model: typeof params.toModel === "string" ? params.toModel : undefined, reroutedFrom: typeof params.fromModel === "string" ? params.fromModel : undefined, rerouteReason: typeof params.reason === "string" ? params.reason : undefined };
+  if (method === "thread/name/updated" && typeof params.threadName === "string") { snapshot.thread.title = params.threadName; const thread = knownThreads.get(event.threadId); if (thread) thread.title = params.threadName; }
+  if (method === "thread/compacted") { snapshot.compaction = "completed"; activeCompactions.delete(event.threadId); }
   const turn = params.turn && typeof params.turn === "object" ? params.turn as Record<string, unknown> : undefined;
   const turnId = typeof params.turnId === "string" ? params.turnId : typeof turn?.id === "string" ? turn.id : undefined;
   if ((method === "turn/completed" || method === "turn/interrupted") && turnId && snapshot.thread.activeTurnId && turnId !== snapshot.thread.activeTurnId) return;
@@ -279,6 +320,7 @@ function updateSnapshot(event: ConsoleEvent): void {
       snapshot.items.push({ id: `codex-error-${String(params.turnId ?? randomUUID())}`, kind: "system", title: "Codex 错误", text: message, status: "failed" });
     }
     if (params.willRetry !== true) {
+      if (activeCompactions.delete(event.threadId)) snapshot.compaction = "failed";
       snapshot.thread.status = "failed";
       snapshot.thread.activeTurnId = undefined;
       snapshot.thread.canInterrupt = false;
@@ -310,6 +352,7 @@ function updateSnapshot(event: ConsoleEvent): void {
     item.diff = `${item.diff ?? ""}${String(params.delta ?? "")}`;
   } else if ((method === "item/started" || method === "item/completed") && params.item && typeof params.item === "object") {
     const mapped = itemFromRaw(params.item, event.receivedAt);
+    if (mapped.kind === "compaction") { mapped.status = method === "item/completed" ? "completed" : "inProgress"; mapped.text = method === "item/completed" ? "上下文压缩完成" : "正在压缩上下文"; snapshot.compaction = method === "item/completed" ? "completed" : "running"; if (method === "item/completed") activeCompactions.delete(event.threadId); else activeCompactions.add(event.threadId); }
     const index = snapshot.items.findIndex((candidate) => candidate.id === mapped.id);
     if (index >= 0) snapshot.items[index] = { ...snapshot.items[index], ...mapped };
     else snapshot.items.push(mapped);
@@ -335,6 +378,8 @@ function updateSnapshot(event: ConsoleEvent): void {
       }
     }
     snapshot.thread.status = terminalStatus === "interrupted" ? "interrupted" : terminalStatus === "failed" || terminalStatus === "systemError" ? "failed" : "completed";
+    if (snapshot.compaction === "running") snapshot.compaction = terminalStatus === "completed" ? "completed" : "failed";
+    activeCompactions.delete(event.threadId);
     snapshot.thread.activeTurnId = undefined;
     snapshot.thread.canInterrupt = false;
     const lastAgent = [...snapshot.items].reverse().find((item) => item.kind === "agent");
@@ -458,7 +503,7 @@ async function buildServer(): Promise<void> {
     for (const controller of runningCommands.values()) controller.abort();
     runningCommands.clear();
   });
-  daemon.get("/api/healthz", async (request) => ok(request, { ok: true, daemonVersion: "0.1.0", buildRevision: process.env.CODEX_CONSOLE_BUILD_REVISION, codexVersion: codex.version, appServer: codex.version === "unknown" ? "starting" : "ready", activeThreads: [...lastActivities.values()].filter((activity) => isTurnActiveStatus(activity.status)).length, activeCommands: runningCommands.size, queuedTurns: [...queuedTurns.values()].reduce((total, queue) => total + queue.length, 0), pendingRequests: [...snapshots.keys()].reduce((total, threadId) => total + codex.getPendingRequests(threadId).length, 0), turnOperations: turnOperations.size, loadedThreads: snapshots.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }));
+  daemon.get("/api/healthz", async (request) => ok(request, { ok: true, daemonVersion: "0.1.0", buildRevision: process.env.CODEX_CONSOLE_BUILD_REVISION, codexVersion: codex.version, appServer: codex.version === "unknown" ? "starting" : "ready", activeThreads: [...lastActivities.values()].filter((activity) => isTurnActiveStatus(activity.status)).length, activeCommands: runningCommands.size, queuedTurns: [...queuedTurns.values()].reduce((total, queue) => total + queue.length, 0), pendingRequests: [...snapshots.keys()].reduce((total, threadId) => total + codex.getPendingRequests(threadId).length, 0), turnOperations: turnOperations.size + activeCompactions.size, loadedThreads: snapshots.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }));
   daemon.post<{ Body: { password?: string } }>("/api/auth/login", async (request, reply) => { await login(request, reply, typeof request.body?.password === "string" ? request.body.password : ""); return; });
   daemon.post("/api/auth/logout", async (request, reply) => { if (!(await requireAuth(request, reply))) return; await logout(request, reply); });
   daemon.get("/api/auth/me", async (request, reply) => { if (!(await requireAuth(request, reply))) return; return ok(request, { authenticated: true, passwordConfigured: Boolean(getState().passwordHash), codexVersion: codex.version }); });
@@ -770,8 +815,30 @@ async function buildServer(): Promise<void> {
     return ok(request, null);
   });
 
-  daemon.get<{ Querystring: { cwd?: string } }>("/api/threads", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const threads = await codex.listThreads(request.query.cwd); const enriched = await Promise.all(threads.map(async (thread) => { knownThreads.set(thread.id, thread); const result = await activityTracker.enrich(thread); result.canRetry = !isTurnActiveStatus(result.status) && codex.controlsThread(result.id); knownThreads.set(result.id, result); return publicThread(result); })); return ok(request, enriched); } catch (error) { return reply.code(503).send(failure(request, "codex_unavailable", error instanceof Error ? error.message : "Codex 不可用", true)); } });
-  daemon.get<{ Params: { threadId: string } }>("/api/threads/:threadId", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const snapshot = await codex.readThread(request.params.threadId); snapshot.thread = await activityTracker.enrich(snapshot.thread); if (!isTurnActiveStatus(snapshot.thread.status)) await codex.tryTakeControl(snapshot.thread.id); snapshot.thread.canRetry = !isTurnActiveStatus(snapshot.thread.status) && codex.controlsThread(snapshot.thread.id); knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot); return ok(request, publicSnapshot(snapshot)); } catch (error) { return reply.code(404).send(failure(request, "thread_not_found", error instanceof Error ? error.message : "线程不存在")); } });
+  daemon.get<{ Querystring: { cwd?: string; cursor?: string; archived?: string; search?: string; page?: string } }>("/api/threads", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    try {
+      const page = await codex.listThreadPage({ cwd: request.query.cwd, cursor: request.query.cursor, archived: request.query.archived === "true", searchTerm: request.query.search?.slice(0, 200) });
+      const threads = await Promise.all(page.threads.map(async (thread) => { if (request.query.archived === "true") archivedIds.add(thread.id); else archivedIds.delete(thread.id); knownThreads.set(thread.id, thread); const result = await activityTracker.enrich(thread); result.canRetry = !isTurnActiveStatus(result.status) && codex.controlsThread(result.id); knownThreads.set(result.id, result); return publicThread(result); }));
+      return ok(request, request.query.page === "true" ? { threads, nextCursor: page.nextCursor } : threads);
+    } catch (error) { return reply.code(503).send(failure(request, "codex_unavailable", error instanceof Error ? error.message : "Codex 不可用", true)); }
+  });
+  daemon.get<{ Params: { threadId: string } }>("/api/threads/:threadId", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    try {
+      const snapshot = await codex.readThread(request.params.threadId);
+      snapshot.compaction = snapshots.get(snapshot.thread.id)?.compaction;
+      snapshot.tokenUsage = snapshots.get(snapshot.thread.id)?.tokenUsage ?? snapshot.tokenUsage;
+      snapshot.thread = await activityTracker.enrich(snapshot.thread);
+      if (!isTurnActiveStatus(snapshot.thread.status) && !archivedIds.has(snapshot.thread.id)) {
+        await codex.tryTakeControl(snapshot.thread.id);
+        snapshot.thread.runtimeSettings = codex.runtimeSettings(snapshot.thread.id) ?? snapshot.thread.runtimeSettings;
+      }
+      snapshot.thread.canRetry = !archivedIds.has(snapshot.thread.id) && !isTurnActiveStatus(snapshot.thread.status) && codex.controlsThread(snapshot.thread.id);
+      knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot);
+      return ok(request, publicSnapshot(snapshot));
+    } catch (error) { return reply.code(404).send(failure(request, "thread_not_found", error instanceof Error ? error.message : "线程不存在")); }
+  });
   daemon.post<{ Body: { cwd?: string; model?: string; sandbox?: string; approvalPolicy?: string } }>("/api/threads", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
     const parsed = z.object({
@@ -800,8 +867,112 @@ async function buildServer(): Promise<void> {
     }
   });
   daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/resume", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { const snapshot = await codex.resumeThread(request.params.threadId); snapshot.thread.canRetry = true; knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot); return ok(request, publicSnapshot(snapshot)); } catch (error) { return reply.code(503).send(failure(request, "resume_failed", error instanceof Error ? error.message : "无法恢复线程", true)); } });
-  daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/archive", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { await codex.archiveThread(request.params.threadId); snapshots.delete(request.params.threadId); return ok(request, null); } catch (error) { return reply.code(503).send(failure(request, "archive_failed", error instanceof Error ? error.message : "无法归档线程", true)); } });
-  daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/unarchive", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { await codex.unarchiveThread(request.params.threadId); return ok(request, null); } catch (error) { return reply.code(503).send(failure(request, "unarchive_failed", error instanceof Error ? error.message : "无法恢复线程", true)); } });
+  daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/archive", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    try { await serializeTurnOperation(request.params.threadId, async () => {
+      const thread = knownThreads.get(request.params.threadId) ?? summaryFromRaw((await codex.request("thread/read", { threadId: request.params.threadId, includeTurns: false }) as { thread: unknown }).thread);
+      if ((thread && isTurnActiveStatus((await activityTracker.inspect(thread)).status)) || queuedTurns.get(request.params.threadId)?.length || activeCompactions.has(request.params.threadId)) throw new Error("请先结束活动任务并处理排队指令，再归档线程");
+      await codex.archiveThread(request.params.threadId); snapshots.delete(request.params.threadId); knownThreads.delete(request.params.threadId); lastActivities.delete(request.params.threadId);
+      archivedIds.add(request.params.threadId);
+    }); return ok(request, null); } catch (error) { return reply.code(409).send(failure(request, "archive_failed", error instanceof Error ? error.message : "无法归档线程", true)); }
+  });
+  daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/unarchive", async (request, reply) => { if (!(await requireAuth(request, reply))) return; try { await serializeTurnOperation(request.params.threadId, async () => { await codex.unarchiveThread(request.params.threadId); archivedIds.delete(request.params.threadId); }); return ok(request, null); } catch (error) { return reply.code(503).send(failure(request, "unarchive_failed", error instanceof Error ? error.message : "无法恢复线程", true)); } });
+
+  daemon.patch<{ Params: { threadId: string } }>("/api/threads/:threadId/name", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.object({ name: z.string().trim().min(1).max(200) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_name", "名称必须为 1–200 个字符"));
+    try { await serializeTurnOperation(request.params.threadId, async () => { await codex.request("thread/name/set", { threadId: request.params.threadId, name: parsed.data.name }); const thread = knownThreads.get(request.params.threadId); if (thread) thread.title = parsed.data.name; const snapshot = snapshots.get(request.params.threadId); if (snapshot) snapshot.thread.title = parsed.data.name; }); return ok(request, null); }
+    catch (error) { return reply.code(409).send(failure(request, "rename_failed", error instanceof Error ? error.message : "重命名失败")); }
+  });
+  daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/fork", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.object({ lastTurnId: z.string().min(1).optional() }).safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_fork", "分支设置无效"));
+    try { let snapshot: ThreadSnapshot | undefined; await serializeTurnOperation(request.params.threadId, async () => { const thread = knownThreads.get(request.params.threadId) ?? summaryFromRaw((await codex.request("thread/read", { threadId: request.params.threadId, includeTurns: false }) as { thread: unknown }).thread); if (activeCompactions.has(request.params.threadId) || (thread && isTurnActiveStatus((await activityTracker.inspect(thread)).status))) throw new Error("请先结束当前任务，再创建分支"); snapshot = await codex.forkThread(request.params.threadId, parsed.data.lastTurnId); knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot); }); return ok(request, publicSnapshot(snapshot!)); }
+    catch (error) { return reply.code(409).send(failure(request, "fork_failed", error instanceof Error ? error.message : "无法创建分支")); }
+  });
+  daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/compact", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    try { await serializeTurnOperation(request.params.threadId, async () => { const snapshot = snapshots.get(request.params.threadId); if (!snapshot) throw new Error("请先打开线程"); if (isTurnActiveStatus((await activityTracker.inspect(snapshot.thread)).status) || activeCompactions.has(request.params.threadId) || queuedTurns.get(request.params.threadId)?.length || archivedIds.has(request.params.threadId)) throw new Error("请等当前任务及排队指令结束后压缩上下文"); if (!(await codex.tryTakeControl(request.params.threadId))) throw new Error("外部 Codex 持有此线程，无法压缩"); snapshot.compaction = "running"; activeCompactions.add(request.params.threadId); try { await codex.request("thread/compact/start", { threadId: request.params.threadId }); } catch (error) { snapshot.compaction = "failed"; activeCompactions.delete(request.params.threadId); throw error; } broadcast({ type: "thread_snapshot", snapshot: publicSnapshot(snapshot) }, request.params.threadId); }); return ok(request, null); }
+    catch (error) { return reply.code(409).send(failure(request, "compact_failed", error instanceof Error ? error.message : "压缩失败")); }
+  });
+  daemon.get<{ Params: { threadId: string } }>("/api/threads/:threadId/queue", async (request, reply) => { if (!(await requireAuth(request, reply))) return; return ok(request, queuedTurns.get(request.params.threadId) ?? []); });
+  daemon.patch<{ Params: { threadId: string } }>("/api/threads/:threadId/queue", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.discriminatedUnion("action", [z.object({ action: z.literal("delete"), id: z.string() }), z.object({ action: z.literal("edit"), id: z.string(), text: z.string().trim().max(100000) }), z.object({ action: z.literal("reorder"), ids: z.array(z.string()).max(1000) })]).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_queue", "排队操作无效"));
+    try { await serializeTurnOperation(request.params.threadId, async () => {
+      const queue = queuedTurns.get(request.params.threadId) ?? []; const input = parsed.data;
+      if (input.action === "reorder") {
+        if (input.ids.length !== queue.length || new Set(input.ids).size !== queue.length || input.ids.some((id) => !queue.some((entry) => entry.id === id))) throw new Error("队列已变化，请刷新后重试");
+        queuedTurns.set(request.params.threadId, input.ids.map((id) => queue.find((entry) => entry.id === id)!));
+      } else { const index = queue.findIndex((entry) => entry.id === input.id); const entry = queue[index]; if (!entry) throw new Error("该指令已开始执行或取消"); if (input.action === "delete") queue.splice(index, 1); else { if (!input.text && !entry.attachments.length) throw new Error("消息不能为空"); entry.text = input.text; } }
+      queueState(request.params.threadId);
+    }); return ok(request, queuedTurns.get(request.params.threadId) ?? []); }
+    catch (error) { return reply.code(409).send(failure(request, "queue_changed", error instanceof Error ? error.message : "队列操作失败")); }
+  });
+  daemon.get<{ Querystring: { threadId?: string } }>("/api/runtime/status", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const thread = request.query.threadId ? knownThreads.get(request.query.threadId) : undefined;
+    const cwd = thread?.cwd ?? config.codexCwd;
+    const unavailable = { available: false, error: "当前 Codex 版本、配置或模型提供商不提供此状态", entries: [] };
+    const read = async (method: string, params: unknown, map: (raw: unknown) => unknown) => { try { return map(await codex.request(method, params, 12000)); } catch { return unavailable; } };
+    const [quotas, mcp, skills, plugins, hooks] = await Promise.all([
+      read("account/rateLimits/read", {}, quotasFromRaw),
+      (async () => {
+        try {
+          const data: unknown[] = []; let cursor: string | null = null; const seen = new Set<string>();
+          do { const page = await codex.request("mcpServerStatus/list", { ...(thread ? { threadId: thread.id } : {}), limit: 100, cursor }, 12000) as { data?: unknown[]; nextCursor?: string }; data.push(...(page.data ?? [])); cursor = page.nextCursor ?? null; if (cursor && seen.has(cursor)) throw new Error("Repeated MCP cursor"); if (cursor) seen.add(cursor); } while (cursor);
+          return inventoryFromRaw("mcp", { data });
+        } catch { return unavailable; }
+      })(),
+      read("skills/list", { cwds: [cwd] }, (raw) => inventoryFromRaw("skills", raw)),
+      read("plugin/installed", { cwds: [cwd] }, (raw) => inventoryFromRaw("plugins", raw)),
+      read("hooks/list", { cwds: [cwd] }, (raw) => inventoryFromRaw("hooks", raw)),
+    ]);
+    return ok(request, { quotas, mcp, skills, plugins, hooks } as RuntimeInventory);
+  });
+
+  daemon.get<{ Params: { threadId: string } }>("/api/threads/:threadId/goal", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    try { return ok(request, await readGoalState(request.params.threadId)); }
+    catch (error) {
+      if (goalUnsupported(error)) return ok(request, { goal: null, supported: false, canControl: false, controlReason: "当前 Codex 版本或配置不支持目标模式" });
+      return reply.code(503).send(failure(request, "goal_read_failed", error instanceof Error ? error.message : "无法读取目标", true));
+    }
+  });
+  daemon.patch<{ Params: { threadId: string } }>("/api/threads/:threadId/goal", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = goalUpdateSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_goal", parsed.error.issues[0]?.message ?? "目标设置无效"));
+    try {
+      let state: GoalState | undefined;
+      await serializeTurnOperation(request.params.threadId, async () => {
+        if (!(await codex.tryTakeControl(request.params.threadId))) throw new Error("当前线程被其他 Codex 窗口占用，无法修改目标。请先在原窗口暂停或退出，再重新打开线程。");
+        const existing = await codex.getGoal(request.params.threadId);
+        const update = existing ? parsed.data : { ...parsed.data, status: parsed.data.status ?? ("paused" as const) };
+        const goal = await codex.setGoal(request.params.threadId, update);
+        state = { goal, supported: true, canControl: true };
+        goalStates.set(request.params.threadId, state);
+        broadcast({ type: "goal_state", threadId: request.params.threadId, state }, request.params.threadId);
+      });
+      return ok(request, state);
+    } catch (error) { return reply.code(409).send(failure(request, "goal_update_failed", error instanceof Error ? error.message : "无法修改目标", true)); }
+  });
+  daemon.delete<{ Params: { threadId: string } }>("/api/threads/:threadId/goal", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    try {
+      const state: GoalState = { goal: null, supported: true, canControl: true };
+      await serializeTurnOperation(request.params.threadId, async () => {
+        if (!(await codex.tryTakeControl(request.params.threadId))) throw new Error("当前线程被其他 Codex 窗口占用，无法删除目标。请先在原窗口暂停或退出，再重新打开线程。");
+        await codex.clearGoal(request.params.threadId);
+        goalStates.set(request.params.threadId, state);
+        broadcast({ type: "goal_state", threadId: request.params.threadId, state }, request.params.threadId);
+      });
+      return ok(request, state);
+    } catch (error) { return reply.code(409).send(failure(request, "goal_delete_failed", error instanceof Error ? error.message : "无法删除目标", true)); }
+  });
 
   daemon.get("/ws", { websocket: true }, (socket: WebSocket, request) => {
     void (async () => {
@@ -827,11 +998,7 @@ async function buildServer(): Promise<void> {
             socket.send(JSON.stringify({
               type: "turn_queue_state",
               threadId: action.threadId,
-              queue: queue.map((item) => ({
-                id: item.id,
-                text: item.text,
-                attachments: item.attachments.map(({ name, kind, size }) => ({ name, kind, size })),
-              })),
+              queue,
             }));
             return;
           }
@@ -839,18 +1006,20 @@ async function buildServer(): Promise<void> {
             await serializeTurnOperation(action.threadId, async () => {
               const thread = knownThreads.get(action.threadId as string) ?? snapshots.get(action.threadId as string)?.thread;
               if (!thread) throw new Error("线程尚未加载");
+              if (archivedIds.has(thread.id)) throw new Error("请先恢复归档线程，再发送消息");
               const input = await resolveTurnInput(action);
               const model = typeof action.model === "string" && action.model ? action.model : undefined;
+              const settings = executionSettingsSchema.parse({ model, effort: action.effort, serviceTier: action.serviceTier, mode: action.mode });
               const activity = await activityTracker.inspect(thread);
-              if (isTurnActiveStatus(activity.status)) {
-                queueTurn(action.threadId as string, input, model);
+              if (isTurnActiveStatus(activity.status) || activeCompactions.has(thread.id)) {
+                queueTurn(action.threadId as string, input, settings);
                 return;
               }
               if (!(await takeControl(thread))) {
-                queueTurn(action.threadId as string, input, model);
+                queueTurn(action.threadId as string, input, settings);
                 return;
               }
-              await codex.startTurn(action.threadId as string, input, { model, effort: typeof action.effort === "string" ? action.effort : undefined });
+              await codex.startTurn(action.threadId as string, input, settings);
             });
             return;
           }
@@ -860,15 +1029,16 @@ async function buildServer(): Promise<void> {
               if (codex.ownsTurn(action.threadId as string, action.turnId as string)) {
                 await codex.steerTurn(action.threadId as string, action.turnId as string, input);
               } else {
-                queueTurn(action.threadId as string, input, typeof action.model === "string" ? action.model : undefined);
+                queueTurn(action.threadId as string, input, executionSettingsSchema.parse({ model: action.model, effort: action.effort, serviceTier: action.serviceTier, mode: action.mode }));
               }
             });
             return;
           }
           if (action.type === "queue_turn" && typeof action.threadId === "string" && (typeof action.text === "string" || Array.isArray(action.attachments))) {
             await serializeTurnOperation(action.threadId, async () => {
+              if (!knownThreads.has(action.threadId as string) || archivedIds.has(action.threadId as string)) throw new Error("请先打开未归档的线程");
               const input = await resolveTurnInput(action);
-              queueTurn(action.threadId as string, input, typeof action.model === "string" ? action.model : undefined);
+              queueTurn(action.threadId as string, input, executionSettingsSchema.parse({ model: action.model, effort: action.effort, serviceTier: action.serviceTier, mode: action.mode }));
               void drainQueuedTurns(action.threadId as string);
             });
             return;
@@ -907,6 +1077,7 @@ async function buildServer(): Promise<void> {
           }
           if (action.type === "retry_last_turn" && typeof action.threadId === "string" && typeof action.text === "string" && action.text.trim()) {
             await serializeTurnOperation(action.threadId, async () => {
+              if (activeCompactions.has(action.threadId as string) || queuedTurns.get(action.threadId as string)?.length) throw new Error("请先等待上下文压缩完成并处理排队指令，再回退重发");
               const activity = await activityTracker.inspect(knownThreads.get(action.threadId as string) ?? snapshots.get(action.threadId as string)?.thread ?? { id: action.threadId as string, title: "", status: "unknown" });
               if (isTurnActiveStatus(activity.status)) throw new Error("请先中止当前运行，再编辑并重新发送最近消息");
               const input = await resolveTurnInput(action);
@@ -920,7 +1091,7 @@ async function buildServer(): Promise<void> {
                 for (const [client, threadId] of subscriptions) if (threadId === action.threadId) subscriptions.set(client, rolledBack.thread.id);
               }
               try {
-                await codex.startTurn(rolledBack.thread.id, input, { model: typeof action.model === "string" && action.model ? action.model : undefined });
+                await codex.startTurn(rolledBack.thread.id, input, executionSettingsSchema.parse({ model: action.model, effort: action.effort, serviceTier: action.serviceTier, mode: action.mode }));
               } catch (error) {
                 broadcast({ type: "error", threadId: rolledBack.thread.id, error: { code: "retry_failed", message: error instanceof Error ? error.message : "重发失败，历史已回退，请直接重新发送", retryable: true } }, rolledBack.thread.id);
               }

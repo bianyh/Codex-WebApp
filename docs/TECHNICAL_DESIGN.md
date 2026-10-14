@@ -218,6 +218,7 @@ interface CodexAdapter {
 | 初始化 | `initialize`、`initialized` | 建立能力集和版本信息 |
 | 线程 | `thread/list`、`thread/read`、`thread/start`、`thread/resume`、`thread/fork` | 会话列表、打开、创建、分支 |
 | Turn | `turn/start`、`turn/steer`、`turn/interrupt` | 发送、追加指令、中断 |
+| Goal | `thread/goal/get`、`set`、`clear`、`updated`、`cleared` | 目标内容/状态/预算/耗时，启用、暂停、编辑、确认删除 |
 | 主状态 | `thread/status/changed`、`turn/started`、`turn/completed` | 顶部状态、按钮状态、完成时间 |
 | 文本 | `item/agentMessage/delta`、`item/completed` | 流式 Agent 消息 |
 | 推理 | `item/reasoning/summaryTextDelta`、`summaryPartAdded` | 可折叠的思考摘要 |
@@ -229,6 +230,18 @@ interface CodexAdapter {
 | 错误 | `error`、`configWarning`、`deprecationNotice` | 可定位的错误提示 |
 
 ## 6. Daemon 内部模块
+
+Goal 状态独立于 Turn。daemon 的认证 `GET/PATCH/DELETE /api/threads/:threadId/goal` 规范化数据并校验目标内容、正整数预算、仅允许用户触发 active/paused。写操作显式传入 `origin:user`，内容修改不隐式改变状态，删除与暂停分离。前端不直接发送 RPC 方法名；相同线程的目标写操作复用 Turn 串行队列。
+
+页面打开或刷新读取当前目标，处理目标通知实时更新；外部 CLI 没有共享 daemon 通知时每 5 秒只读轮询，切回可见页面立即同步。其他进程持有 writer 时允许展示，禁止强制关闭 CLI。暂停/删除只操作目标，不使用进程信号，立即停止消息仍使用已有中止按钮。面板提供明确的只读/不支持/错误解释；桌面边栏、手机 Sheet 和主题共用一套组件。
+
+其他已接入的前端能力及协议边界见 `docs/FRONTEND_CAPABILITY_AUDIT.md`。握手声明 `experimentalApi:true`，协议生成也包含实验字段，原生 `collaborationMode` 与服务速度通过 `turn/start` 传入，不以提示词模拟计划模式。
+
+排队指令保存完整附件和下一轮执行设置。队列编辑/删除/排序与 drain、Turn 发送共用每线程串行锁，排序验证全部 ID 严格匹配，已发出的指令不能修改。此队列只属于本 daemon，明确不代表其他 CLI 的原生队列。归档、分支与压缩有活动检查；打开归档记录不恢复它，恢复是独立操作。上下文压缩占用健康接口的 `turnOperations`，防止空闲部署重启打断它。
+
+实际运行设置来自 resume/start 响应、`thread/settings/updated` 与 `model/rerouted`；下一轮选择与运行模型分开展示。累计 token 和 `last` token / `modelContextWindow` 分开计算，缺数据不估造容量。MCP/Skills/已安装插件/Hooks 与账户配额使用只读 RPC 和字段白名单，排除凭据、账户 ID、原始命令与原始配置。MCP 状态翻页完整读取；不执行 OAuth、远程插件安装或账户配置修改。
+
+专用结构化时间线项覆盖子代理、搜索、查看/生成图片、审查、等待与压缩。搜索只允许无凭据 HTTP(S) 链接；本机图片走已鉴权文件接口，内联图片只允许有大小上限的栅格格式；未知项显示兼容说明而非直接转发完整原始对象。工具耗时和退出码是独立展示字段。
 
 ```text
 HTTP Server
@@ -437,6 +450,8 @@ type ServerEvent =
 - 左右栏均可独立折叠并在本机浏览器中记住状态；右栏以 Tab 显示 Plan、Changed files、Diff、Files、直接 Shell 命令和 Usage。
 - 顶部状态栏显示当前模型、推理强度、沙箱/审批模式、Token 用量和运行耗时。
 - Composer 固定在中栏底部，支持多行输入、图片附件入口、发送/停止按钮和“追加到当前 Turn”状态。
+- 下一轮执行设置以模型旁的紧凑按钮呈现，浮层编辑推理强度、服务速度与模式，收起后只显示摘要；不占输入框下方的独立行，浮层不改变 Composer 高度且支持点击外部/Escape 关闭。
+- 每次进入线程在历史截取和首次折叠布局完成后瞬时定位最新消息；短时间观察内容尺寸以校正字体/初始快照布局，不持续跟随流式消息。用户滚轮、触摸、拖动、键盘导航或加载更早消息立即停止初始校正；同线程后续快照不重新初始化定位。
 
 ### 9.2 手机布局
 

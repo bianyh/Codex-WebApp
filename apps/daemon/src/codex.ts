@@ -1,8 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
-import type { AdapterCapabilities, ConsoleEvent, ModelOption, PendingRequest, ThreadSnapshot, ThreadSummary, TimelineItem, ThreadStatus, TurnInput } from "./types.js";
+import type { AdapterCapabilities, ConsoleEvent, Goal, ModelOption, PendingRequest, ThreadSnapshot, ThreadSummary, TimelineItem, ThreadStatus, TurnInput } from "./types.js";
 import { config } from "./config.js";
+import { goalFromRaw, goalUpdateSchema, type GoalUpdate } from "./goal.js";
+import { mapTokenUsage, runtimeSettingsFromRaw, structuredItem } from "./runtimeMapping.js";
+import { executionParams } from "./executionSettings.js";
+import type { ExecutionSettings, RuntimeSettings } from "./types.js";
 
 type RpcResponse = { id?: string | number; result?: unknown; error?: { code?: number; message?: string; data?: unknown } };
 type RpcNotification = { method: string; id?: string | number; params?: Record<string, unknown> };
@@ -97,6 +101,7 @@ function summaryFromRaw(raw: unknown): ThreadSummary {
     updatedAt: updated ?? created,
     model: typeof value.model === "string" ? value.model : undefined,
     rolloutPath: typeof value.path === "string" ? value.path : undefined,
+    runtimeSettings: runtimeSettingsFromRaw(value.runtimeSettings ?? value),
   };
 }
 
@@ -118,10 +123,12 @@ function itemFromRaw(raw: unknown, fallbackCreatedAt?: string): TimelineItem {
   const type = String(value.type ?? "unknown");
   const id = String(value.id ?? randomUUID());
   const createdAt = timestampToIso(value.createdAt ?? value.timestamp) ?? fallbackCreatedAt;
+  const structured = structuredItem(value);
+  if (structured?.kind) return { id, kind: structured.kind, createdAt, ...structured };
   if (type === "userMessage") return { id, kind: "user", createdAt, text: textFromContent(value.content) };
   if (type === "agentMessage") return { id, kind: "agent", createdAt, text: typeof value.text === "string" ? value.text : textFromContent(value.content), status: typeof value.phase === "string" ? value.phase : undefined };
   if (type === "reasoning") return { id, kind: "reasoning", createdAt, text: typeof value.text === "string" ? value.text : textFromContent(value.summary) || textFromContent(value.content), title: "Reasoning" };
-  if (type === "commandExecution" || type === "command_execution") return { id, kind: "command", createdAt, command: typeof value.command === "string" ? value.command : undefined, output: typeof value.aggregatedOutput === "string" ? value.aggregatedOutput : typeof value.output === "string" ? value.output : undefined, status: typeof value.status === "string" ? value.status : undefined, title: "Command" };
+  if (type === "commandExecution" || type === "command_execution") return { id, kind: "command", createdAt, command: typeof value.command === "string" ? value.command : undefined, output: typeof value.aggregatedOutput === "string" ? value.aggregatedOutput : typeof value.output === "string" ? value.output : undefined, status: typeof value.status === "string" ? value.status : undefined, title: "Command", exitCode: typeof value.exitCode === "number" ? value.exitCode : undefined, durationMs: typeof value.durationMs === "number" ? value.durationMs : undefined };
   if (type === "fileChange" || type === "file_change") {
     const changes = Array.isArray(value.changes) ? value.changes.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object") : [];
     return { id, kind: "file_change", createdAt, path: typeof value.path === "string" ? value.path : typeof changes[0]?.path === "string" ? changes[0].path : undefined, diff: typeof value.diff === "string" ? value.diff : changes.map((change) => typeof change.diff === "string" ? change.diff : "").filter(Boolean).join("\n"), status: typeof value.status === "string" ? value.status : undefined, title: changes.length === 1 ? "File change" : `${changes.length} file changes`, metadata: { changes } };
@@ -130,9 +137,9 @@ function itemFromRaw(raw: unknown, fallbackCreatedAt?: string): TimelineItem {
   if (type === "functionCallOutput" || type === "dynamicToolCall" || type.toLowerCase().includes("mcp")) {
     const result = value.result && typeof value.result === "object" ? value.result as Record<string, unknown> : undefined;
     const content = value.output ?? value.contentItems ?? result?.content ?? value.result ?? value.error;
-    return { id, kind: "mcp", createdAt, title: typeof value.name === "string" ? value.name : typeof value.tool === "string" ? value.tool : "MCP tool", text: textFromContent(content) || (content && typeof content === "object" ? JSON.stringify(content, null, 2) : undefined), status: typeof value.status === "string" ? value.status : undefined };
+    return { id, kind: "mcp", createdAt, title: typeof value.name === "string" ? value.name : typeof value.tool === "string" ? value.tool : "MCP tool", text: textFromContent(content) || (content && typeof content === "object" ? JSON.stringify(content, null, 2) : undefined), status: typeof value.status === "string" ? value.status : undefined, durationMs: typeof value.durationMs === "number" ? value.durationMs : undefined };
   }
-  return { id, kind: "unknown", createdAt, title: type, metadata: value };
+  return { id, kind: "unknown", createdAt, title: type, text: "当前版本尚未提供此事件的专用展示" };
 }
 
 function snapshotFromRaw(raw: Record<string, unknown>): ThreadSnapshot {
@@ -174,11 +181,7 @@ export function planFromRaw(value: unknown): NonNullable<ThreadSnapshot["plan"]>
 }
 
 export function tokenUsageFromRaw(value: unknown): ThreadSnapshot["tokenUsage"] {
-  if (!value || typeof value !== "object") return undefined;
-  const usage = value as Record<string, unknown>;
-  const totals = usage.total && typeof usage.total === "object" ? usage.total as Record<string, unknown> : usage;
-  const number = (candidate: unknown): number | undefined => typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined;
-  return { input: number(totals.inputTokens ?? totals.input), output: number(totals.outputTokens ?? totals.output), total: number(totals.totalTokens ?? totals.total) };
+  return mapTokenUsage(value);
 }
 
 export class CodexProcess {
@@ -192,6 +195,7 @@ export class CodexProcess {
   private loadedThreads = new Set<string>();
   private activeTurns = new Map<string, string>();
   private pendingRequests = new Map<string | number, { threadId?: string; request: PendingRequest }>();
+  private settings = new Map<string, RuntimeSettings>();
   private _version = "unknown";
   private _capabilities: AdapterCapabilities = { codexVersion: "unknown", methods: [], supportsSteer: true, supportsApprovals: true, supportsDiff: true, supportsPlan: true };
 
@@ -207,10 +211,12 @@ export class CodexProcess {
     return Boolean(ownedTurnId && (!turnId || ownedTurnId === turnId));
   }
   controlsThread(threadId: string): boolean { return this.loadedThreads.has(threadId); }
+  runtimeSettings(threadId: string): RuntimeSettings | undefined { return this.settings.get(threadId); }
   async tryTakeControl(threadId: string): Promise<boolean> {
     if (this.loadedThreads.has(threadId)) return true;
     try {
-      await this.request("thread/resume", { threadId });
+      const result = await this.request("thread/resume", { threadId });
+      this.settings.set(threadId, runtimeSettingsFromRaw(result));
       this.loadedThreads.add(threadId);
       return true;
     } catch {
@@ -236,6 +242,7 @@ export class CodexProcess {
       child.once("error", (error) => {
         this.activeTurns.clear();
         this.loadedThreads.clear();
+        this.settings.clear();
         this.rejectAll(error);
         if (!this.stopping) reject(error);
       });
@@ -249,10 +256,11 @@ export class CodexProcess {
         // permanently busy and prevent the next message from starting.
         this.activeTurns.clear();
         this.loadedThreads.clear();
+        this.settings.clear();
         this.rejectAll(new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`));
         this.emit({ sourceMethod: "server/exit", params: { code, signal } });
       });
-      this.request("initialize", { clientInfo: { name: "codex_console", title: "Codex Console", version: "0.1.0" } }, 15000)
+      this.request("initialize", { clientInfo: { name: "codex_console", title: "Codex Console", version: "0.1.0" }, capabilities: { experimentalApi: true } }, 15000)
         .then((result) => {
           const value = (result && typeof result === "object" ? result : {}) as Record<string, unknown>;
           const userAgent = typeof value.userAgent === "string" ? value.userAgent : "";
@@ -282,6 +290,7 @@ export class CodexProcess {
     this.activeTurns.clear();
     this.loadedThreads.clear();
     this.pendingRequests.clear();
+    this.settings.clear();
     this._version = "unknown";
     this.rejectAll(new Error("Codex app-server stopped"));
     child.kill("SIGTERM");
@@ -319,6 +328,11 @@ export class CodexProcess {
     return Array.isArray(data) ? data.map(summaryFromRaw).filter((item) => item.id) : [];
   }
 
+  async listThreadPage(input: { cwd?: string; cursor?: string; archived?: boolean; searchTerm?: string }): Promise<{ threads: ThreadSummary[]; nextCursor: string | null }> {
+    const result = await this.request("thread/list", { ...input, limit: 100, sortKey: "updated_at" }) as { data?: unknown[]; nextCursor?: string };
+    return { threads: (result.data ?? []).map(summaryFromRaw).filter((thread) => thread.id), nextCursor: result.nextCursor ?? null };
+  }
+
   async listModels(): Promise<ModelOption[]> {
     const models: ModelOption[] = [];
     let cursor: string | null = null;
@@ -344,6 +358,10 @@ export class CodexProcess {
           description:
             typeof model.description === "string" ? model.description : "",
           isDefault: model.isDefault === true,
+          supportedReasoningEfforts: Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts as ModelOption["supportedReasoningEfforts"] : [],
+          defaultReasoningEffort: typeof model.defaultReasoningEffort === "string" ? model.defaultReasoningEffort : undefined,
+          serviceTiers: Array.isArray(model.serviceTiers) ? model.serviceTiers as ModelOption["serviceTiers"] : [],
+          defaultServiceTier: typeof model.defaultServiceTier === "string" ? model.defaultServiceTier : null,
           inputModalities: Array.isArray(model.inputModalities)
             ? model.inputModalities.filter(
                 (entry): entry is "text" | "image" | "audio" =>
@@ -359,8 +377,28 @@ export class CodexProcess {
 
   async readThread(threadId: string): Promise<ThreadSnapshot> {
     const snapshot = snapshotFromRaw(await this.readRawThread(threadId));
+    snapshot.thread.runtimeSettings = { ...snapshot.thread.runtimeSettings, ...this.settings.get(threadId) };
     snapshot.pendingRequests = this.getPendingRequests(threadId);
     return snapshot;
+  }
+
+  async getGoal(threadId: string): Promise<Goal | null> {
+    const result = await this.request("thread/goal/get", { threadId }) as { goal: unknown };
+    return goalFromRaw(result.goal, threadId);
+  }
+
+  async setGoal(threadId: string, update: GoalUpdate): Promise<Goal> {
+    const input = goalUpdateSchema.parse(update);
+    await this.ensureLoaded(threadId);
+    const result = await this.request("thread/goal/set", { threadId, ...input, origin: "user" }) as { goal: unknown };
+    const goal = goalFromRaw(result.goal, threadId);
+    if (!goal) throw new Error("Codex 未返回更新后的目标");
+    return goal;
+  }
+
+  async clearGoal(threadId: string): Promise<void> {
+    await this.ensureLoaded(threadId);
+    await this.request("thread/goal/clear", { threadId, origin: "user" });
   }
 
   private async readRawThread(threadId: string): Promise<Record<string, unknown>> {
@@ -395,17 +433,25 @@ export class CodexProcess {
     const result = await this.request("thread/start", params);
     const thread = (result && typeof result === "object" ? (result as Record<string, unknown>).thread : result) as unknown;
     const summary = summaryFromRaw(thread);
+    this.settings.set(summary.id, runtimeSettingsFromRaw(result));
+    summary.runtimeSettings = this.settings.get(summary.id);
     this.loadedThreads.add(summary.id);
     return { thread: summary, items: [], pendingRequests: [], changedFiles: [], plan: [], diff: "" };
   }
 
-  async resumeThread(threadId: string): Promise<ThreadSnapshot> { await this.request("thread/resume", { threadId }); this.loadedThreads.add(threadId); return this.readThread(threadId); }
+  async resumeThread(threadId: string): Promise<ThreadSnapshot> { const result = await this.request("thread/resume", { threadId }); this.settings.set(threadId, runtimeSettingsFromRaw(result)); this.loadedThreads.add(threadId); return this.readThread(threadId); }
   async archiveThread(threadId: string): Promise<void> { await this.request("thread/archive", { threadId }); }
   async unarchiveThread(threadId: string): Promise<void> { await this.request("thread/unarchive", { threadId }); }
 
-  async startTurn(threadId: string, input: TurnInput, settings?: { model?: string; effort?: string; sandboxPolicy?: unknown; approvalPolicy?: string }): Promise<unknown> {
+  async forkThread(threadId: string, lastTurnId?: string): Promise<ThreadSnapshot> {
+    const result = await this.request("thread/fork", { threadId, ...(lastTurnId ? { lastTurnId } : {}), excludeTurns: true }) as { thread: { id: string } };
+    this.loadedThreads.add(result.thread.id);
+    this.settings.set(result.thread.id, runtimeSettingsFromRaw(result));
+    return this.readThread(result.thread.id);
+  }
+  async startTurn(threadId: string, input: TurnInput, settings?: ExecutionSettings): Promise<unknown> {
     await this.ensureLoaded(threadId);
-    const result = await this.request("turn/start", { threadId, input: userInputFromTurn(input), model: settings?.model ?? null, effort: settings?.effort ?? null, sandboxPolicy: settings?.sandboxPolicy ?? null, approvalPolicy: settings?.approvalPolicy ?? null });
+    const result = await this.request("turn/start", { threadId, input: userInputFromTurn(input), ...executionParams(settings ?? {}, this.settings.get(threadId)?.model) });
     const turn = result && typeof result === "object" ? (result as Record<string, unknown>).turn : undefined;
     if (turn && typeof turn === "object" && typeof (turn as Record<string, unknown>).id === "string") this.activeTurns.set(threadId, String((turn as Record<string, unknown>).id));
     return result;
@@ -453,7 +499,8 @@ export class CodexProcess {
   private async startIfNeeded(method: string): Promise<void> { if (!this.child && method !== "initialize") await this.start(); }
   private async ensureLoaded(threadId: string): Promise<void> {
     if (this.loadedThreads.has(threadId)) return;
-    await this.request("thread/resume", { threadId });
+    const result = await this.request("thread/resume", { threadId });
+    this.settings.set(threadId, runtimeSettingsFromRaw(result));
     this.loadedThreads.add(threadId);
   }
 
@@ -471,6 +518,8 @@ export class CodexProcess {
     if ("method" in message && typeof message.method === "string") {
       const params: Record<string, unknown> = { ...(message.params ?? {}), ...(message.id !== undefined ? { requestId: message.id } : {}) };
       const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+      if (threadId && message.method === "thread/settings/updated") this.settings.set(threadId, runtimeSettingsFromRaw(params.threadSettings));
+      if (threadId && message.method === "model/rerouted") this.settings.set(threadId, { ...this.settings.get(threadId), model: typeof params.toModel === "string" ? params.toModel : undefined, reroutedFrom: typeof params.fromModel === "string" ? params.fromModel : undefined, rerouteReason: typeof params.reason === "string" ? params.reason : undefined });
       const turn = params.turn && typeof params.turn === "object" ? params.turn as Record<string, unknown> : undefined;
       const turnId = typeof params.turnId === "string" ? params.turnId : typeof turn?.id === "string" ? turn.id : undefined;
       if (message.id !== undefined) {

@@ -54,12 +54,14 @@ import {
   ShieldAlert,
   Square,
   Sun,
+  Target,
   Terminal,
   X,
   Zap,
 } from "lucide-react";
 import type {
   Item,
+  GoalState,
   ModelOption,
   RequestItem,
   Snapshot,
@@ -67,6 +69,8 @@ import type {
   Thread,
   TimelineEvent,
   UploadAttachment,
+  ExecutionSettings,
+  QueueEntry,
 } from "./types";
 import { FilePreview, WorkspaceFiles, fileEntryFromPath, type FsEntry } from "./WorkspaceFiles";
 import { resolveLocalFileHref } from "./fileLinks";
@@ -80,6 +84,15 @@ import { createCommandId } from "./commandId";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { changeStatusFromRaw, planFromRaw, tokenUsageFromRaw } from "./protocolMapping";
 import { responseForRequest } from "./requestResponse";
+import { GoalPanel, type GoalControls } from "./GoalPanel";
+import { goalStatusLabels } from "./goalState";
+import { useGoal } from "./useGoal";
+import { QueuePanel, RuntimeStatusPanel, UsagePanel } from "./RuntimePanels";
+import { ExecutionSettingsMenu } from "./ExecutionSettingsMenu";
+import { useThreadEntryScroll } from "./useThreadEntryScroll";
+import { StructuredItem } from "./StructuredItem";
+import { ThreadActions } from "./ThreadActions";
+import { runtimeSettingsFromRaw, structuredItem } from "../../daemon/src/runtimeMapping";
 import "./styles.css";
 import "katex/dist/katex.min.css";
 
@@ -283,7 +296,7 @@ function StatusPill({ status }: { status: Thread["status"] }) {
     idle: ["待命", "muted"],
     unknown: ["未知", "muted"],
   };
-  const [label, cls] = map[status] ?? map.unknown;
+  const [label, cls] = (map[status] ?? map.unknown)!;
   return (
     <span className={`status-pill ${cls}`}>
       <span className="status-dot" />
@@ -309,6 +322,12 @@ function ThreadDrawer({
   onCollapse,
   open,
   onClose,
+  query,
+  onQuery,
+  archived,
+  onArchived,
+  nextCursor,
+  onMore,
 }: {
   threads: Thread[];
   selected: string | null;
@@ -318,13 +337,14 @@ function ThreadDrawer({
   onCollapse: () => void;
   open: boolean;
   onClose: () => void;
+  query: string;
+  onQuery: (query: string) => void;
+  archived: boolean;
+  onArchived: (value: boolean) => void;
+  nextCursor: string | null;
+  onMore: () => void;
 }) {
-  const [query, setQuery] = useState("");
-  const filtered = threads.filter((thread) =>
-    `${thread.title} ${thread.cwd ?? ""}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
-  );
+  const filtered = threads;
   return (
     <aside className={`drawer ${open ? "open" : ""}`}>
       <div className="drawer-top">
@@ -347,12 +367,12 @@ function ThreadDrawer({
         <Search size={15} />
         <input
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => onQuery(e.target.value)}
           placeholder="搜索线程"
         />
       </div>
       <div className="drawer-section-label">
-        <span>最近线程</span>
+        <span>{archived ? "归档线程" : "最近线程"}</span>
         <span className="count">{filtered.length}</span>
       </div>
       <div className="thread-list">
@@ -376,11 +396,12 @@ function ThreadDrawer({
         {filtered.length === 0 && (
           <div className="empty-small">没有匹配的线程</div>
         )}
+        {nextCursor && <button className="drawer-action" onClick={onMore}>加载更多线程</button>}
       </div>
       <div className="drawer-bottom">
-        <button className="drawer-action">
+        <button className="drawer-action" onClick={() => onArchived(!archived)}>
           <Archive size={16} />
-          归档
+          {archived ? "返回最近线程" : "归档"}
         </button>
         <button className="drawer-action" onClick={onSettings}>
           <Settings size={16} />
@@ -392,6 +413,7 @@ function ThreadDrawer({
 }
 
 const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false, editable = false, editUnavailableReason, onEdit, onOpenFile }: { item: Item; cwd?: string; isLastUser?: boolean; editable?: boolean; editUnavailableReason?: string; onEdit?: (item: Item) => void; onOpenFile?: (entry: FsEntry) => void }) {
+  if (["agents", "search", "image", "review", "sleep", "compaction"].includes(item.kind)) return <StructuredItem item={item} cwd={cwd} onOpenFile={onOpenFile} />;
   if (item.kind === "user")
     return (
       <article className="message user-message" data-user-message="true" data-item-id={item.id}>
@@ -399,6 +421,7 @@ const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false,
         <div className="message-body">
           <div className="message-meta">
             你 <span>{itemTimestamp(item)}</span>
+            {item.queueId && <span className="queued-message-label">待执行指令</span>}
             {isLastUser && (
               <button className="message-edit-button" disabled={!editable} onClick={() => onEdit?.(item)} title={editable ? "编辑并重新发送最近消息" : editUnavailableReason} aria-label="编辑并重新发送最近消息">
                 <PencilLine size={14} />
@@ -473,6 +496,7 @@ const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false,
           </pre>
         )}
         {item.output && <pre className="command-output">{item.output}</pre>}
+        {(item.exitCode !== undefined || item.durationMs !== undefined) && <div className="tool-metadata">{item.exitCode !== undefined ? `退出码 ${item.exitCode}` : ""} {item.durationMs !== undefined ? `耗时 ${(item.durationMs / 1000).toFixed(2)} 秒` : ""}</div>}
       </details>
     );
   if (item.kind === "file_change")
@@ -503,9 +527,11 @@ const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false,
       <summary>
         <Zap size={15} />
         <span>{item.title ?? "事件"}</span>
+        <span className="card-status">{item.status}</span>
         <ChevronDown size={15} className="chevron" />
       </summary>
       <div className="card-content"><MessageMarkdown text={item.text ?? ""} cwd={cwd} onOpenFile={onOpenFile} /></div>
+      {item.durationMs !== undefined && <div className="tool-metadata">耗时 {(item.durationMs / 1000).toFixed(2)} 秒</div>}
     </details>
   );
 });
@@ -755,18 +781,26 @@ function ApprovalBar({
 
 function ContextPanel({
   snapshot,
+  goalControls,
   tab,
   setTab,
   onOpenFile,
   onClose,
   onCollapse,
+  queue,
+  onQueueUpdate,
+  active,
 }: {
   snapshot: Snapshot | null;
+  goalControls: GoalControls;
   tab: string;
   setTab: (tab: string) => void;
   onOpenFile: (entry: FsEntry) => void;
   onClose?: () => void;
   onCollapse?: () => void;
+  queue: QueueEntry[];
+  onQueueUpdate: (queue: QueueEntry[]) => void;
+  active: boolean;
 }) {
   return (
     <aside className="context-panel">
@@ -781,13 +815,16 @@ function ContextPanel({
         </div>
       </div>
       <div className="context-tabs">
-        {[
+        {([
+          ["goal", "Goal", Target],
           ["plan", "Plan", ListChecks],
           ["diff", "Diff", GitBranch],
           ["files", "Files", Folder],
           ["terminal", "命令", Terminal],
           ["usage", "Usage", Activity],
-        ].map(([key, label, Icon]) => (
+          ["queue", "队列", ListChecks],
+          ["status", "状态", Cpu],
+        ] as const).map(([key, label, Icon]) => (
           <button
             key={String(key)}
             className={tab === key ? "active" : ""}
@@ -801,6 +838,7 @@ function ContextPanel({
       <div
         className={`context-content ${tab === "files" ? "files-context" : ""} ${tab === "terminal" ? "terminal-context" : ""}`}
       >
+        {tab === "goal" && <GoalPanel threadId={snapshot?.thread.id} controls={goalControls} />}
         {tab === "plan" && (
           <div className="context-block">
             <div className="context-title">
@@ -845,30 +883,9 @@ function ContextPanel({
             onOpenFile={onOpenFile}
           />
         )}
-        {tab === "usage" && (
-          <div className="context-block">
-            <div className="context-title">
-              <Activity size={15} />
-              Token 用量
-            </div>
-            <div className="usage-total">
-              {snapshot?.tokenUsage?.total?.toLocaleString() ?? "--"}
-              <span>tokens</span>
-            </div>
-            <div className="usage-row">
-              <span>输入</span>
-              <strong>
-                {snapshot?.tokenUsage?.input?.toLocaleString() ?? "--"}
-              </strong>
-            </div>
-            <div className="usage-row">
-              <span>输出</span>
-              <strong>
-                {snapshot?.tokenUsage?.output?.toLocaleString() ?? "--"}
-              </strong>
-            </div>
-          </div>
-        )}
+        {tab === "usage" && <UsagePanel snapshot={snapshot} queueLength={queue.length} api={api} />}
+        {tab === "queue" && <QueuePanel threadId={snapshot?.thread.id} queue={queue} api={api} onUpdate={onQueueUpdate} />}
+        {tab === "status" && active && <RuntimeStatusPanel threadId={snapshot?.thread.id} api={api} />}
         <div className={`command-panel-host ${tab === "terminal" ? "active" : ""}`}>
           <CommandPanel cwd={snapshot?.thread.cwd} />
         </div>
@@ -880,10 +897,19 @@ function ContextPanel({
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [threadQuery, setThreadQuery] = useState("");
+  const [archivedThreads, setArchivedThreads] = useState(false);
+  const [threadCursor, setThreadCursor] = useState<string | null>(null);
+  const threadListGeneration = useRef(0);
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedArchived, setSelectedArchived] = useState(false);
+  const goalControls = useGoal(selected, authenticated, api);
+  const goalControlsRef = useRef(goalControls);
+  goalControlsRef.current = goalControls;
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const [desktopLayout, setDesktopLayout] = useState(() => window.matchMedia("(min-width: 1121px)").matches);
   const [contextTab, setContextTab] = useState("plan");
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => storedBoolean("codex-console-left-sidebar-collapsed"));
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(() => storedBoolean("codex-console-right-sidebar-collapsed"));
@@ -897,7 +923,11 @@ function App() {
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [previewEntry, setPreviewEntry] = useState<FsEntry | null>(null);
-  const [queuedTurns, setQueuedTurns] = useState<Array<{ id: string; text: string }>>([]);
+  const [queuedTurns, setQueuedTurns] = useState<QueueEntry[]>([]);
+  const [executionSettings, setExecutionSettings] = useState<Record<string, ExecutionSettings>>(() => {
+    try { const value = JSON.parse(localStorage.getItem("codex-console-execution-settings") ?? "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; }
+  });
+  const [threadActionsOpen, setThreadActionsOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(initialTheme);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [defaultModel, setDefaultModel] = useState(() => localStorage.getItem("codex-console-default-model") ?? "");
@@ -911,6 +941,7 @@ function App() {
   const applyEventRef = useRef<(event: TimelineEvent) => void>(() => {});
   const pendingSendRef = useRef<{ threadId: string; text: string; editing: typeof editingLastMessage } | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const timelineContentRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<UploadAttachment[]>([]);
@@ -923,13 +954,20 @@ function App() {
   const selectedModel = selected ? threadModels[selected] ?? defaultModel : defaultModel;
   const turnIsActive = isTurnActiveStatus(snapshot?.thread.status);
   const trimTimelineRef = useRef(true);
-  const pendingInitialScrollRef = useRef<string | null>(null);
   const pendingPrependHeightRef = useRef<number | null>(null);
   const clearAttachments = useCallback(() => {
     setAttachments((items) => {
       for (const item of items) if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       return [];
     });
+  }, []);
+  const updateQueue = useCallback((queue: QueueEntry[]) => {
+    setQueuedTurns(queue);
+    setSnapshot((current) => current ? { ...current, items: current.items.flatMap((item) => {
+      if (!item.queueId) return [item];
+      const entry = queue.find((entry) => entry.id === item.queueId);
+      return entry ? [{ ...item, text: entry.text || item.text }] : [];
+    }) } : current);
   }, []);
   const appendTimelineError = useCallback((message: string, turnId?: string, markFailed = true) => {
     setError(message);
@@ -979,14 +1017,6 @@ function App() {
   useEffect(() => {
     setProcessExpanded(turnIsActive && (snapshot?.items.length ?? 0) <= TIMELINE_MAX_ITEMS);
   }, [selected, turnIsActive, snapshot?.items.length]);
-  useEffect(() => {
-    if (!selected) return;
-    trimTimelineRef.current = true;
-    pendingInitialScrollRef.current = selected;
-    pendingPrependHeightRef.current = null;
-    setVisibleStart(0);
-    setAutoFollow(true);
-  }, [selected]);
   useEffect(() => () => {
     for (const attachment of attachmentsRef.current) {
       if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
@@ -1009,9 +1039,17 @@ function App() {
     setMessageNavigation((current) => current.index === index && current.count === nodes.length ? current : { index, count: nodes.length });
   }, []);
 
+  const cancelEntryScroll = useThreadEntryScroll({
+    selected, renderedThreadId: snapshot?.thread.id, itemCount: snapshot?.items.length ?? 0,
+    visibleStart, initialCount: INITIAL_TIMELINE_ITEMS, setVisibleStart,
+    containerRef: timelineRef, contentRef: timelineContentRef,
+    reset: () => { trimTimelineRef.current = true; pendingPrependHeightRef.current = null; setAutoFollow(true); },
+    positioned: () => { setAutoFollow(true); updateMessageNavigation(); },
+  });
   const navigateUserMessage = useCallback((direction: -1 | 1) => {
     const container = timelineRef.current;
     if (!container) return;
+    cancelEntryScroll();
     const nodes = Array.from(container.querySelectorAll<HTMLElement>("[data-user-message='true']"));
     if (nodes.length === 0) return;
     const targetIndex = Math.max(0, Math.min(nodes.length - 1, messageNavigation.index + direction));
@@ -1024,19 +1062,33 @@ function App() {
     container.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
   }, [messageNavigation.index]);
 
-  const loadThreads = useCallback(async () => {
-    const value = await api<Thread[]>("/api/threads");
-    setThreads(value);
-    if (!selected && value[0]) setSelected(value[0].id);
-  }, [selected]);
+  const loadThreads = useCallback(async (cursor?: string) => {
+    const generation = ++threadListGeneration.current;
+    const params = new URLSearchParams({ page: "true", archived: String(archivedThreads), search: threadQuery });
+    if (cursor) params.set("cursor", cursor);
+    const response = await api<Thread[] | { threads: Thread[]; nextCursor: string | null }>(`/api/threads?${params}`);
+    if (generation !== threadListGeneration.current) return;
+    const value = Array.isArray(response) ? response : response.threads;
+    setThreads((previous) => cursor ? [...previous, ...value.filter((entry) => !previous.some((thread) => thread.id === entry.id))] : value);
+    setThreadCursor(Array.isArray(response) ? null : response.nextCursor);
+    if (!selectedThreadRef.current && value[0] && !archivedThreads) setSelected(value[0].id);
+  }, [threadQuery, archivedThreads]);
   useEffect(() => {
     api<{ authenticated: boolean }>("/api/auth/me")
       .then(() => setAuthenticated(true))
       .catch(() => setAuthenticated(false));
   }, []);
   useEffect(() => {
-    if (authenticated) loadThreads().catch((e) => setError(e.message));
+    if (!authenticated) return;
+    const timer = setTimeout(() => { void loadThreads().catch((e) => setError(e.message)); }, 200);
+    return () => { clearTimeout(timer); threadListGeneration.current += 1; };
   }, [authenticated, loadThreads]);
+  useEffect(() => { localStorage.setItem("codex-console-execution-settings", JSON.stringify(executionSettings)); }, [executionSettings]);
+  useEffect(() => { const media = window.matchMedia("(min-width: 1121px)"); const change = () => setDesktopLayout(media.matches); media.addEventListener("change", change); return () => media.removeEventListener("change", change); }, []);
+  useEffect(() => {
+    const open = (event: Event) => { const id = (event as CustomEvent<unknown>).detail; if (typeof id === "string") { setArchivedThreads(false); setSelected(id); } };
+    window.addEventListener("codex-open-thread", open); return () => window.removeEventListener("codex-open-thread", open);
+  }, []);
   useEffect(() => {
     if (!authenticated) return;
     api<ModelOption[]>("/api/models")
@@ -1106,14 +1158,17 @@ function App() {
             subscribedThreadRef.current = data.thread.id;
             if (pendingSendRef.current) pendingSendRef.current = { ...pendingSendRef.current, threadId: data.thread.id, editing: null };
             setThreads((items) => [data.thread, ...items.filter((thread) => thread.id !== data.thread.id)]);
-            setThreadModels((models) => models[selected!] ? { ...models, [data.thread.id]: models[selected!] } : models);
+            setThreadModels((models) => models[selected!] ? { ...models, [data.thread.id]: models[selected!]! } : models);
             setSelected(data.thread.id);
             setError("旧格式线程不支持原地回退，已创建截至上一轮的重发分支；原线程保持不变。");
           } else if (data.thread.id !== selected) return;
           setSnapshot(data);
+          if (data.goalState) goalControlsRef.current.receiveState(data.goalState, data.thread.id);
           setActiveTurnId(data.thread.activeTurnId ?? null);
           setRequests(data.pendingRequests ?? []);
           setConnection("live");
+        } else if (event.type === "goal_state") {
+          if (typeof event.threadId === "string" && event.state && typeof event.state === "object") goalControlsRef.current.receiveState(event.state as GoalState, event.threadId);
         } else if (event.type === "thread_activity") {
           const activity = event.activity as { threadId: string; status: Thread["status"]; activeTurnId?: string; canInterrupt?: boolean; activitySource?: Thread["activitySource"] };
           setThreads((items) => items.map((thread) => thread.id === activity.threadId ? { ...thread, ...activity } : thread));
@@ -1123,17 +1178,24 @@ function App() {
           }
         } else if (event.type === "turn_queued") {
           if (event.threadId === selected && typeof event.queuedId === "string" && typeof event.text === "string") {
-            setQueuedTurns((items) => items.some((item) => item.id === event.queuedId) ? items : [...items, { id: event.queuedId as string, text: event.text as string }]);
+            setQueuedTurns((items) => items.some((item) => item.id === event.queuedId) ? items : [...items, { id: event.queuedId as string, text: event.text as string, attachments: [] }]);
+            setSnapshot((current) => {
+              if (!current) return current;
+              const pending = current.items.find((item) => item.kind === "user" && item.id.startsWith("local-user-") && !item.queueId && (!event.text || item.text === event.text));
+              return pending ? { ...current, items: current.items.map((item) => item.id === pending.id ? { ...item, queueId: event.queuedId as string } : item) } : current;
+            });
+            pendingSendRef.current = null;
           }
         } else if (event.type === "turn_dequeued") {
           if (event.threadId === selected && typeof event.queuedId === "string") {
               setQueuedTurns((items) => items.filter((item) => item.id !== event.queuedId));
+              setSnapshot((current) => current ? { ...current, items: current.items.map((item) => item.queueId === event.queuedId ? { ...item, queueId: undefined } : item) } : current);
             }
         } else if (event.type === "turn_queue_state") {
           if (event.threadId === selected && Array.isArray(event.queue)) {
-            setQueuedTurns(
+            updateQueue(
               event.queue.filter(
-                (item): item is { id: string; text: string } =>
+                (item): item is QueueEntry =>
                   Boolean(item) &&
                   typeof item === "object" &&
                   typeof (item as Record<string, unknown>).id === "string" &&
@@ -1183,9 +1245,27 @@ function App() {
       closed = true;
       wsRef.current?.close();
     };
-  }, [authenticated, subscribe, appendTimelineError]);
+  }, [authenticated, subscribe, appendTimelineError, updateQueue]);
   const applyEvent = (event: TimelineEvent) => {
+    if (event.method === "thread/goal/updated" || event.method === "thread/goal/cleared") {
+      if (selectedThreadRef.current) goalControlsRef.current.receiveEvent(event, selectedThreadRef.current);
+      return;
+    }
     const params = event.params ?? {};
+    if (event.method === "thread/name/updated" && typeof params.threadName === "string") {
+      setThreads((threads) => threads.map((thread) => thread.id === selectedThreadRef.current ? { ...thread, title: params.threadName as string } : thread));
+      setSnapshot((current) => current ? { ...current, thread: { ...current.thread, title: params.threadName as string } } : current);
+      return;
+    }
+    if (event.method === "thread/settings/updated") {
+      setSnapshot((current) => current ? { ...current, thread: { ...current.thread, runtimeSettings: runtimeSettingsFromRaw(params.threadSettings) } } : current);
+      return;
+    }
+    if (event.method === "model/rerouted") {
+      setSnapshot((current) => current ? { ...current, thread: { ...current.thread, runtimeSettings: { ...current.thread.runtimeSettings, model: typeof params.toModel === "string" ? params.toModel : undefined, reroutedFrom: typeof params.fromModel === "string" ? params.fromModel : undefined, rerouteReason: typeof params.reason === "string" ? params.reason : undefined } } } : current);
+      return;
+    }
+    if (event.method === "thread/compacted") { setSnapshot((current) => current ? { ...current, compaction: "completed" } : current); return; }
     const eventCreatedAt = event.receivedAt ?? new Date().toISOString();
     const turnObject =
       params.turn && typeof params.turn === "object"
@@ -1250,8 +1330,8 @@ function App() {
         const index = items.findIndex((item) => item.id === itemId);
         if (index >= 0)
           items[index] = {
-            ...items[index],
-            text: `${items[index].text ?? ""}${String(params.delta ?? params.text ?? "")}`,
+            ...items[index]!,
+            text: `${items[index]!.text ?? ""}${String(params.delta ?? params.text ?? "")}`,
           };
         else
           items.push({
@@ -1267,8 +1347,8 @@ function App() {
         const index = items.findIndex((item) => item.id === itemId);
         if (index >= 0)
           items[index] = {
-            ...items[index],
-            text: `${items[index].text ?? ""}${String(params.delta ?? params.text ?? "")}`,
+            ...items[index]!,
+            text: `${items[index]!.text ?? ""}${String(params.delta ?? params.text ?? "")}`,
           };
         else
           items.push({
@@ -1280,14 +1360,14 @@ function App() {
           });
       } else if (event.method === "item/plan/delta") {
         const index = items.findIndex((item) => item.id === itemId);
-        if (index >= 0) items[index] = { ...items[index], text: `${items[index].text ?? ""}${String(params.delta ?? "")}` };
+        if (index >= 0) items[index] = { ...items[index]!, text: `${items[index]!.text ?? ""}${String(params.delta ?? "")}` };
         else items.push({ id: itemId, kind: "plan", createdAt: eventCreatedAt, title: "Plan", status: "inProgress", text: String(params.delta ?? "") });
       } else if (event.method === "item/commandExecution/outputDelta" || event.method === "command/exec/outputDelta") {
         const index = items.findIndex((item) => item.id === itemId);
         if (index >= 0)
           items[index] = {
-            ...items[index],
-            output: `${items[index].output ?? ""}${String(params.delta ?? params.output ?? "")}`,
+            ...items[index]!,
+            output: `${items[index]!.output ?? ""}${String(params.delta ?? params.output ?? "")}`,
           };
         else
           items.push({
@@ -1302,8 +1382,8 @@ function App() {
         const index = items.findIndex((item) => item.id === itemId);
         if (index >= 0)
           items[index] = {
-            ...items[index],
-            diff: `${items[index].diff ?? ""}${String(params.delta ?? "")}`,
+            ...items[index]!,
+            diff: `${items[index]!.diff ?? ""}${String(params.delta ?? "")}`,
           };
         else
           items.push({
@@ -1343,7 +1423,7 @@ function App() {
                   ? "file_change"
                   : rawType === "plan"
                     ? "plan"
-                    : rawType.toLowerCase().includes("mcp")
+                    : rawType.toLowerCase().includes("mcp") || rawType === "dynamicToolCall" || rawType === "functionCallOutput"
                       ? "mcp"
                       : rawType === "userMessage"
                         ? "user"
@@ -1365,6 +1445,11 @@ function App() {
                 ? "inProgress"
                 : undefined,
         };
+        Object.assign(mapped, structuredItem(raw) ?? {});
+        if (typeof raw.path === "string" || typeof raw.savedPath === "string") mapped.path = String(raw.savedPath ?? raw.path);
+        if (typeof raw.durationMs === "number") mapped.durationMs = raw.durationMs;
+        if (typeof raw.exitCode === "number") mapped.exitCode = raw.exitCode;
+        if (mapped.kind === "compaction") { mapped.status = event.method === "item/completed" ? "completed" : "inProgress"; mapped.text = event.method === "item/completed" ? "上下文压缩完成" : "正在压缩上下文"; }
         const mergedItems = mergeTimelineItem(items, mapped);
         items = mergedItems;
         for (const change of changes) {
@@ -1417,7 +1502,8 @@ function App() {
         thread.canInterrupt = false;
         thread.activitySource = undefined;
       }
-      return { ...current, thread, items, changedFiles, diff, plan, tokenUsage };
+      const compaction = (event.method === "item/started" || event.method === "item/completed") && (params.item as { type?: string } | undefined)?.type === "contextCompaction" ? (event.method === "item/completed" ? "completed" : "running") : event.method === "turn/completed" && current.compaction === "running" ? (thread.status === "completed" ? "completed" : "failed") : current.compaction;
+      return { ...current, thread, items, changedFiles, diff, plan, tokenUsage, compaction };
     });
   };
   applyEventRef.current = applyEvent;
@@ -1455,18 +1541,6 @@ function App() {
   useLayoutEffect(() => {
     const container = timelineRef.current;
     if (!container) return;
-    const threadId = snapshot?.thread.id;
-    if (threadId && threadId === selected && pendingInitialScrollRef.current === threadId) {
-      const start = Math.max(0, (snapshot?.items.length ?? 0) - INITIAL_TIMELINE_ITEMS);
-      if (visibleStart !== start) {
-        setVisibleStart(start);
-        return;
-      }
-      pendingInitialScrollRef.current = null;
-      container.scrollTop = container.scrollHeight;
-      setAutoFollow(true);
-      updateMessageNavigation();
-    }
     const previousHeight = pendingPrependHeightRef.current;
     if (previousHeight !== null) {
       pendingPrependHeightRef.current = null;
@@ -1546,7 +1620,7 @@ function App() {
     const actionType = editingLastMessage
       ? "retry_last_turn"
       : isTurnActiveStatus(snapshot?.thread.status)
-        ? snapshot.thread.status !== "running" || snapshot.thread.activitySource === "external"
+        ? snapshot?.thread.status !== "running" || snapshot?.thread.activitySource === "external"
           ? "queue_turn"
           : "steer_turn"
         : "start_turn";
@@ -1586,6 +1660,7 @@ function App() {
       text,
       attachments: outgoingAttachments,
       model: selectedModel || undefined,
+      ...(executionSettings[selected] ?? {}),
     }));
     clearAttachments();
     setEditingLastMessage(null);
@@ -1601,6 +1676,8 @@ function App() {
       method: "POST",
       body: JSON.stringify(options),
     });
+    setArchivedThreads(false);
+    setSelectedArchived(false);
     freshThreadRef.current = value.thread.id;
     setSnapshot(value);
     setThreads((items) => [value.thread, ...items]);
@@ -1653,8 +1730,14 @@ function App() {
       : Math.min(visibleStart, snapshot.items.length)
     : 0;
   const visibleTimelineItems = snapshot?.items.slice(timelineStart) ?? [];
+  const openGoalPanel = () => {
+    setContextTab("goal");
+    if (window.matchMedia("(min-width: 1121px)").matches) setRightSidebarCollapsed(false);
+    else setContextOpen(true);
+  };
   const loadEarlierMessages = () => {
     if (!snapshot || timelineStart <= 0 || pendingPrependHeightRef.current !== null) return;
+    cancelEntryScroll();
     const container = timelineRef.current;
     if (container) pendingPrependHeightRef.current = container.scrollHeight;
     trimTimelineRef.current = false;
@@ -1666,12 +1749,18 @@ function App() {
       <ThreadDrawer
         threads={threads}
         selected={selected}
-        onSelect={setSelected}
+        onSelect={(id) => { setSelectedArchived(archivedThreads); setSelected(id); }}
         onCreate={() => setNewThreadOpen(true)}
         onSettings={() => { setSettingsOpen(true); setDrawerOpen(false); }}
         onCollapse={() => setLeftSidebarCollapsed(true)}
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
+        query={threadQuery}
+        onQuery={setThreadQuery}
+        archived={archivedThreads}
+        onArchived={setArchivedThreads}
+        nextCursor={threadCursor}
+        onMore={() => { if (threadCursor) void loadThreads(threadCursor).catch((reason) => setError(reason.message)); }}
       />
       <main className="main-column">
         <header className="topbar">
@@ -1688,6 +1777,8 @@ function App() {
             <h2>{currentThread?.title ?? "选择一个线程"}</h2>
           </div>
           <div className="topbar-actions">
+            <button className="icon-button" disabled={!snapshot} onClick={() => setThreadActionsOpen(true)} aria-label="线程操作" title="重命名、分支和归档"><MoreHorizontal size={18} /></button>
+            <button className="icon-button" disabled={!selected} onClick={openGoalPanel} aria-label="打开目标控制" title="目标模式"><Target size={18} /></button>
             <span className={`connection-label ${connection}`}>
               <span className="connection-dot" />
               {connection === "live"
@@ -1723,7 +1814,9 @@ function App() {
         <div className="thread-meta">
           <StatusPill status={currentThread?.status ?? "unknown"} />
           <span className="meta-divider" />
-          <span>{currentModelLabel}</span>
+          <span title="Codex 当前运行模型">{snapshot?.thread.runtimeSettings?.model ?? snapshot?.thread.model ?? currentModelLabel}</span>
+          {snapshot?.thread.runtimeSettings?.effort && <span>{snapshot.thread.runtimeSettings.effort}</span>}
+          {snapshot?.thread.runtimeSettings?.mode && <span>{snapshot.thread.runtimeSettings.mode}</span>}
           <span className="meta-divider" />
           <span className="cwd-label">
             <Folder size={13} />
@@ -1740,6 +1833,9 @@ function App() {
             文件
           </button>
         </div>
+        {goalControls.state?.goal && <button className="goal-summary" onClick={openGoalPanel} aria-label="查看当前目标">
+          <Target size={15} /><span className={`goal-status ${goalControls.state.goal.status}`}>{goalStatusLabels[goalControls.state.goal.status]}</span><span className="goal-summary-objective">{goalControls.state.goal.objective}</span>
+        </button>}
         <div
           className="timeline"
           ref={timelineRef}
@@ -1752,6 +1848,7 @@ function App() {
             updateMessageNavigation();
           }}
         >
+          <div className="timeline-content" ref={timelineContentRef}>
           {!snapshot && (
             <div className="loading-state">
               <LoaderCircle className="spin" size={19} />
@@ -1794,6 +1891,7 @@ function App() {
               <p>描述你想完成的工作，Codex 会在本机项目中执行。</p>
             </div>
           )}
+          </div>
         </div>
         {messageNavigation.count > 1 && (
           <div className="message-nav-controls" aria-label="用户消息导航">
@@ -1914,17 +2012,27 @@ function App() {
                   <select
                     aria-label="消息模型"
                     value={selectedModel}
-                    disabled={snapshot?.thread.status === "running" && snapshot?.thread.activitySource !== "external"}
+                    disabled={Boolean(editingLastMessage)}
                     onChange={(event) => {
                       if (!selected) return;
                       setThreadModels((current) => ({ ...current, [selected]: event.target.value }));
+                      setExecutionSettings((current) => ({ ...current, [selected]: {} }));
                     }}
                   >
                     <option value="">Codex 默认</option>
                     {models.map((model) => <option key={model.id} value={model.model}>{model.displayName}</option>)}
                   </select>
                 </label>
-                <span>{queuedTurns.length ? `${queuedTurns.length} 条指令排队中 · ` : ""}⌘ Enter 发送</span>
+                <ExecutionSettingsMenu
+                  threadId={selected}
+                  models={models}
+                  model={selectedModel || snapshot?.thread.runtimeSettings?.model || snapshot?.thread.model || ""}
+                  value={selected ? executionSettings[selected] ?? {} : {}}
+                  disabled={!selected || Boolean(editingLastMessage)}
+                  onChange={(value) => { if (selected) setExecutionSettings((current) => ({ ...current, [selected]: value })); }}
+                />
+                {queuedTurns.length > 0 && <button className="queue-count-button" onClick={() => { setContextTab("queue"); setRightSidebarCollapsed(false); setContextOpen(true); }}>{queuedTurns.length} 条指令排队中</button>}
+                <span className="composer-shortcut">⌘ Enter 发送</span>
               </div>
               <div className="composer-actions">
                 {isTurnActiveStatus(snapshot?.thread.status) && (
@@ -1932,7 +2040,7 @@ function App() {
                     className="stop-button"
                     onClick={interrupt}
                     aria-label="停止当前任务"
-                    title={snapshot.thread.activitySource === "external" ? "中止外部 Codex 任务；对应 Codex 进程可能退出" : "中止这次消息"}
+                    title={snapshot?.thread.activitySource === "external" ? "中止外部 Codex 任务；对应 Codex 进程可能退出" : "中止这次消息"}
                   >
                     <Square size={15} fill="currentColor" />
                   </button>
@@ -1953,6 +2061,10 @@ function App() {
       <div className={`context-mobile ${contextOpen ? "open" : ""}`}>
         <ContextPanel
           snapshot={snapshot}
+          goalControls={goalControls}
+          queue={queuedTurns}
+          onQueueUpdate={updateQueue}
+          active={!desktopLayout && contextOpen}
           tab={contextTab}
           setTab={setContextTab}
           onOpenFile={setPreviewEntry}
@@ -1962,12 +2074,22 @@ function App() {
       <aside className="context-desktop">
         <ContextPanel
           snapshot={snapshot}
+          goalControls={goalControls}
+          queue={queuedTurns}
+          onQueueUpdate={updateQueue}
+          active={desktopLayout && !rightSidebarCollapsed}
           tab={contextTab}
           setTab={setContextTab}
           onOpenFile={setPreviewEntry}
           onCollapse={() => setRightSidebarCollapsed(true)}
         />
       </aside>
+      {threadActionsOpen && snapshot && <ThreadActions thread={snapshot.thread} archived={selectedArchived} onClose={() => setThreadActionsOpen(false)} onAction={async (action, name) => {
+        const id = snapshot.thread.id;
+        if (action === "fork") { const fork = await api<Snapshot>(`/api/threads/${encodeURIComponent(id)}/fork`, { method: "POST", body: "{}" }); setArchivedThreads(false); setSelectedArchived(false); setSelected(fork.thread.id); setSnapshot(fork); }
+        else { await api(`/api/threads/${encodeURIComponent(id)}/${action}`, { method: action === "name" ? "PATCH" : "POST", body: JSON.stringify(action === "name" ? { name } : {}) }); if (action === "archive") { setSelected(null); setSnapshot(null); setThreads((threads) => threads.filter((thread) => thread.id !== id)); } if (action === "unarchive") { setArchivedThreads(false); setSelectedArchived(false); } if (action === "name") setSnapshot((current) => current?.thread.id === id ? { ...current, thread: { ...current.thread, title: name! } } : current); }
+        await loadThreads();
+      }} />}
       {newThreadOpen && (
         <NewThreadDialog
           initialPath={currentThread?.cwd}
