@@ -19,7 +19,7 @@ command -v node
 command -v codex
 ```
 
-项目要求 Node.js 22.13+。如果 `node` 或 `codex` 不存在，先停止并告诉用户需要安装对应工具；不要自动下载未知来源的二进制文件。若 Node/Codex 由 Volta、nvm 或其他版本管理器提供，记下后台服务需要使用的绝对路径。需要预览 Word 时，检查 daemon 用户是否能运行本机 LibreOffice Writer；不需要 Word 预览时可不安装。
+项目要求 Node.js 22.13+。如果 `node` 或 `codex` 不存在，先停止并告诉用户需要安装对应工具；不要自动下载未知来源的二进制文件。若 Node/Codex 由 Volta、nvm 或其他版本管理器提供，记下后台服务需要使用的绝对路径。需要预览 Word 或 PowerPoint 时，检查 daemon 用户是否能运行本机 LibreOffice Writer 或 Impress；不需要对应预览时可不安装。
 
 确认 Codex CLI 已由当前用户完成登录。只检查命令的退出状态或版本信息，不读取、复制或打印 `~/.codex`、API key、Token 等认证文件。如果 Codex 未登录，要求用户先在本机完成官方登录流程。
 
@@ -80,7 +80,7 @@ CODEX_CONSOLE_DATA_DIR="$HOME/.local/state/codex-console" \
 - `CODEX_CONSOLE_PORT`：默认 `8787`。端口冲突时先告诉用户并选择新端口，不要杀掉未知进程。
 - `CODEX_COMMAND`：Codex 不在 `PATH` 时填写绝对可执行文件路径。
 - `CODEX_CONSOLE_SHELL`：命令窗口使用的 Shell，默认取 `$SHELL`，否则为 `/bin/bash`。该窗口可绕过 Codex 审批执行 daemon 用户有权执行的任意命令，应只在受信网络中启用服务。
-- `CODEX_CONSOLE_LIBREOFFICE`：可选，Word 预览使用的 `libreoffice` 可执行文件；不在服务的 `PATH` 时设置绝对路径。
+- `CODEX_CONSOLE_LIBREOFFICE`：可选，Word 和 PowerPoint 预览使用的 `libreoffice` 可执行文件；不在服务的 `PATH` 时设置绝对路径。
 - `CODEX_CONSOLE_ORIGIN`：使用固定域名或反向代理时填写完整 Origin，例如 `https://codex.example.com`。
 
 快速前台验证可以这样运行：

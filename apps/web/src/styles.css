@@ -282,14 +282,30 @@ html[data-theme="light"] .directory-create-row input { background: #fff; border-
 html[data-theme="light"] .theme-segment button.active { background: #fff; color: #1e242b; box-shadow: 0 1px 4px #38475b26; }
 html[data-theme="light"] .secondary-button { background: #e7ebf0; color: #303740; }
 html[data-theme="light"] .preview-body { background: #f5f7f9; }
-.preview-pdf, .preview-word { display: flex; flex-direction: column; overflow: hidden; }
+.preview-pdf, .preview-word, .preview-presentation { display: flex; flex-direction: column; align-items: stretch; overflow: hidden; }
+.preview-overlay-document { grid-template-columns: minmax(0, 1fr); }
+.preview-overlay-document .preview-window { width: min(1600px, 100%); height: calc(100dvh - 44px); }
 .document-preview { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; }
-.document-preview-toolbar { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 3px 8px; border-bottom: 1px solid var(--line); font-size: 12px; }
-.document-preview-toolbar button { width: 40px; height: 40px; }
-.document-preview-scroll { overflow: auto; min-height: 0; flex: 1; }
-.document-preview-sheet { padding: 10px; text-align: center; }
-.document-preview-sheet canvas:not([hidden]) { display: block; margin: 0 auto; max-width: 100%; height: auto; background: #fff; }
-.document-preview-sheet .preview-loading, .document-preview-sheet .preview-error { padding: 28px 12px; overflow-wrap: anywhere; }
+.document-preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 12px; padding: 2px 6px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.document-preview-controls { display: flex; align-items: center; gap: 2px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.document-preview-controls button { min-width: 42px; min-height: 42px; }
+.document-preview-controls button:disabled { opacity: .35; cursor: default; }
+.document-preview-fit { background: transparent; color: inherit; border-radius: 5px; }
+.document-preview-fit:hover { background: var(--panel-2); }
+.document-preview-scroll { overflow: auto; overflow-anchor: none; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0; flex: 1; }
+.document-preview-sheet { position: relative; }
+.document-preview-page { position: absolute; overflow: hidden; background: #fff; box-shadow: 0 1px 6px #0004; }
+.document-preview-tile { position: absolute; }
+.document-preview-text { position: absolute; z-index: 1; top: 0; left: 0; width: var(--pdf-text-width); height: var(--pdf-text-height); line-height: 1; text-align: initial; transform-origin: 0 0; -webkit-text-size-adjust: none; text-size-adjust: none; }
+.document-preview-text[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.document-preview-text[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.document-preview-text[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
+.document-preview-text :is(span, br) { position: absolute; color: transparent; white-space: pre; cursor: text; transform-origin: 0 0; -webkit-user-select: text; user-select: text; }
+.document-preview-text span { font-size: calc(var(--pdf-text-scale) * var(--min-font-size, 1) * var(--font-height)); transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(calc(1 / var(--min-font-size, 1))); }
+.document-preview-text ::selection { color: transparent; background: #3c83ef66; }
+.document-preview-pending { flex: 1; display: grid; place-items: center; padding: 16px; text-align: center; }
+.document-preview-page .preview-error { padding: 12px; overflow-wrap: anywhere; }
+@media (max-width: 720px) { .preview-overlay-document .preview-window { height: 100dvh; } }
 html[data-theme="light"] .preview-body .text-preview, html[data-theme="light"] .markdown-preview { color: #252b33; }
 html[data-theme="light"] .file-entry { border-color: #e0e4e9; color: #53606e; }
 html[data-theme="light"] .file-entry:hover { background: #edf1f5; color: #20242b; }

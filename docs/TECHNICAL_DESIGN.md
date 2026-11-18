@@ -392,6 +392,7 @@ POST /api/fs/server-directories
 GET  /api/fs/content?path=
 GET  /api/fs/raw?path=
 GET  /api/fs/word-preview?path=
+GET  /api/fs/presentation-preview?path=
 POST /api/commands
 DELETE /api/commands/:commandId
 
@@ -411,7 +412,9 @@ type ApiResponse<T> =
   | { ok: false; error: { code: string; message: string; retryable: boolean }; requestId: string };
 ```
 
-预览文件流使用本机鉴权。`#page=N` 只在浏览器中用于定位 PDF 页码，传给文件接口和复制到剪贴板的都是不含页码片段的文件路径。PDF 阅读器按需加载并一次渲染一页。`.doc` 和 `.docx` 在 daemon 本机用临时 LibreOffice 配置转换，限制并发和转换时间，关闭宏、活动内容及自动链接更新；原文件仍通过下载接口提供。
+预览文件流使用本机鉴权。`#page=N` 只在浏览器中用于定位 PDF 页码，传给文件接口和复制到剪贴板的都是不含页码片段的文件路径。PDF 阅读器默认适应宽度，支持连续滚动和缩放，按视口仅渲染附近页面；大画布改用可见分块，并按当前缩放和设备像素密度绘制。`.doc`、`.docx` 使用 LibreOffice Writer 转换，`.ppt`、`.pptx` 使用 Impress 输出静态幻灯片。两者共用本机临时配置、并发和转换时间限制，关闭宏和活动内容；Word 的自动链接更新也被关闭。下载接口返回原文件。
+
+预览器使用 PDF.js 文字层支持原生选中和复制，文字层与画布共用页面坐标；不对图片做 OCR。桌面 `Ctrl + 滚轮` 使用连续比例并尽量保持鼠标下的内容位置，普通滚轮仍用于滚动。
 
 ### 8.2 WebSocket 客户端动作
 

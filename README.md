@@ -43,7 +43,7 @@ official codex app-server -> local projects and tools
 - Markdown/GFM and LaTeX/KaTeX rendering.
 - Live Codex model discovery plus persistent custom model names for locally configured third-party providers.
 - Per-thread model selection, image/file/audio attachments, and desktop clipboard paste for images and files.
-- Authenticated server-filesystem browsing, uploads, line-numbered text, media, PDF page links, local Word previews, and copy-absolute-path actions.
+- Authenticated server-filesystem browsing, uploads, line-numbered text, media, PDF page links, local Word and PowerPoint previews, and copy-absolute-path actions.
 - Independently collapsible desktop sidebars and an authenticated shell-command window with a selectable server directory.
 - Light/dark themes and installable PWA support.
 

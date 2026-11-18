@@ -19,6 +19,7 @@ import {
   FolderPlus,
   LoaderCircle,
   Music,
+  Presentation,
   RefreshCw,
   Copy,
   Upload,
@@ -40,6 +41,7 @@ export type FsEntry = {
     | "audio"
     | "pdf"
     | "word"
+    | "presentation"
     | "binary";
   pdfPage?: number;
   size: number;
@@ -124,6 +126,7 @@ function FileIcon({ entry, size = 15 }: { entry: FsEntry; size?: number }) {
   if (entry.kind === "text" || entry.kind === "markdown")
     return <FileCode2 size={size} />;
   if (entry.kind === "pdf" || entry.kind === "word") return <FileText size={size} />;
+  if (entry.kind === "presentation") return <Presentation size={size} />;
   return <File size={size} />;
 }
 
@@ -143,6 +146,7 @@ export function kindFromName(name: string): FsEntry["kind"] {
   if ([".mp3", ".wav", ".ogg", ".m4a", ".flac"].includes(extension)) return "audio";
   if (extension === ".pdf") return "pdf";
   if (extension === ".doc" || extension === ".docx") return "word";
+  if (extension === ".ppt" || extension === ".pptx") return "presentation";
   if ([".zip", ".tar", ".gz", ".7z", ".bin", ".pt", ".pth", ".safetensors"].includes(extension)) return "binary";
   return "text";
 }
@@ -542,6 +546,9 @@ export function FilePreview({
   const [copiedPath, setCopiedPath] = useState(false);
   const lineCount = content?.content.split(/\r?\n/).length;
   const rawUrl = `/api/fs/raw?path=${encodeURIComponent(entry.path)}`;
+  const office = entry.kind === "word" || entry.kind === "presentation" ? entry.kind : undefined;
+  const isDocument = entry.kind === "pdf" || Boolean(office);
+  const documentUrl = office ? `/api/fs/${office}-preview?path=${encodeURIComponent(entry.path)}` : rawUrl;
   useEffect(() => {
     if (entry.kind !== "text" && entry.kind !== "markdown") return;
     setLoading(true);
@@ -553,7 +560,7 @@ export function FilePreview({
       .finally(() => setLoading(false));
   }, [entry]);
   return (
-    <div className="preview-overlay" role="dialog" aria-modal="true">
+    <div className={`preview-overlay${isDocument ? " preview-overlay-document" : ""}`} role="dialog" aria-modal="true">
       <section className="preview-window">
         <header className="preview-header">
           <div className="preview-title">
@@ -613,11 +620,11 @@ export function FilePreview({
           {entry.kind === "audio" && (
             <audio src={rawUrl} controls preload="metadata" />
           )}
-          {(entry.kind === "pdf" || entry.kind === "word") && (
+          {isDocument && (
             <Suspense fallback={<div className="preview-loading" role="status">正在加载文档预览</div>}>
               <DocumentPreview
-                url={entry.kind === "word" ? `/api/fs/word-preview?path=${encodeURIComponent(entry.path)}` : rawUrl}
-                word={entry.kind === "word"}
+                url={documentUrl}
+                office={office}
                 initialPage={entry.pdfPage ?? 1}
               />
             </Suspense>
