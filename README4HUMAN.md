@@ -23,9 +23,10 @@ official codex app-server -> local projects and tools
 ## Requirements
 
 - Linux or macOS. The user-level systemd deployment below requires Linux.
-- Node.js 20 or newer and npm 10 or newer.
+- Node.js 22.13 or newer and npm 10 or newer.
 - The official Codex CLI installed and logged in for the same user that runs the daemon.
 - Git.
+- Optional: LibreOffice Writer on the daemon host for `.doc` and `.docx` previews. PDF previews do not require LibreOffice.
 - A network path from your phone to the server: local LAN, Tailscale, VPN, or an HTTPS reverse proxy.
 
 ## Manual Installation
@@ -70,6 +71,7 @@ Configuration is supplied through environment variables:
 | `CODEX_CWD` | daemon startup directory | Default working directory for new threads and Codex. |
 | `CODEX_COMMAND` | `codex` | Codex executable. Use an absolute path with version managers. |
 | `CODEX_CONSOLE_SHELL` | `$SHELL` or `/bin/bash` | Shell executable used by the direct command window. |
+| `CODEX_CONSOLE_LIBREOFFICE` | `libreoffice` | Optional LibreOffice executable used for Word previews; use its absolute path if it is not on the daemon's `PATH`. |
 | `CODEX_CONSOLE_SESSION_DAYS` | `7` | Session lifetime in days. |
 | `LOG_LEVEL` | `info` | Fastify log level. |
 
@@ -83,6 +85,8 @@ npm run start
 ```
 
 The new-thread dialog and Files panel can navigate to any server path available to the daemon's operating-system user. Absolute paths are used directly, and relative paths are resolved from `CODEX_CWD`. The Files panel can upload files, create directories, preview or download files, and copy server-side absolute paths anywhere that user has permission. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
+
+PDF links such as `report.pdf#page=5` open the preview at page 5. Word previews use a temporary local PDF conversion, one document at a time, without sending the document to an online converter. Word input is limited to 25 MiB, the result to 50 MiB and conversion to 25 seconds. Available server fonts can affect layout. If conversion is unavailable or fails, the download button still returns the original file.
 
 ### Custom models and providers
 

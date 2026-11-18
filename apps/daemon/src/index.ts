@@ -23,6 +23,7 @@ import { ThreadIndexReconciler } from "./threadIndex.js";
 import { threadForkSchema } from "./threadFork.js";
 import { runWorkspaceCommand } from "./workspaceCommand.js";
 import { resolveServerDirectory, resolveServerPath } from "./serverDirectory.js";
+import { isWordDocument, renderWordPreview, WordPreviewError } from "./wordPreview.js";
 import type { ConsoleEvent, GoalState, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
 
 const daemon = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
@@ -46,6 +47,7 @@ const turnOperations = new Map<string, Promise<void>>();
 let refreshingActivities: Promise<void> | null = null;
 let cachedOfficialModels: ModelOption[] = [];
 const runningCommands = new Map<string, AbortController>();
+let convertingWord = false;
 const activityTracker = new ThreadActivityTracker(
   (threadId, turnId) => codex.ownsTurn(threadId, turnId),
   (rolloutPath) => externalCodex.ownerFor(rolloutPath),
@@ -459,15 +461,17 @@ const mimeTypes: Record<string, string> = {
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".m4v": "video/x-m4v", ".ogv": "video/ogg",
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".m4a": "audio/mp4", ".flac": "audio/flac",
   ".pdf": "application/pdf", ".md": "text/markdown; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".json": "application/json; charset=utf-8", ".html": "text/html; charset=utf-8",
+  ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };
 
-function fileKind(filePath: string): "text" | "markdown" | "image" | "video" | "audio" | "pdf" | "binary" {
+function fileKind(filePath: string): "text" | "markdown" | "image" | "video" | "audio" | "pdf" | "word" | "binary" {
   const extension = path.extname(filePath).toLowerCase();
   if (extension === ".md" || extension === ".mdx") return "markdown";
   if (mimeTypes[extension]?.startsWith("image/")) return "image";
   if (mimeTypes[extension]?.startsWith("video/")) return "video";
   if (mimeTypes[extension]?.startsWith("audio/")) return "audio";
   if (extension === ".pdf") return "pdf";
+  if (isWordDocument(filePath)) return "word";
   if (textExtensions.has(extension) || !extension) return "text";
   return "binary";
 }
@@ -767,6 +771,22 @@ async function buildServer(): Promise<void> {
       const content = await readFile(filePath, "utf8");
       return ok(request, { path: filePath, name: path.basename(filePath), kind, size: metadata.size, modifiedAt: metadata.mtime.toISOString(), content });
     } catch (error) { return reply.code(400).send(failure(request, "read_failed", error instanceof Error ? error.message : "无法读取文件")); }
+  });
+
+  daemon.get<{ Querystring: { path?: string } }>("/api/fs/word-preview", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    if (typeof request.query.path !== "string" || !request.query.path) return reply.code(400).send(failure(request, "missing_path", "缺少文件路径"));
+    if (convertingWord) return reply.code(429).send(failure(request, "preview_busy", "正在转换另一份 Word 文档，请稍后重试", true));
+    convertingWord = true;
+    try {
+      const pdf = await renderWordPreview(request.query.path, config.codexCwd, config.libreOfficeCommand);
+      return reply.type("application/pdf").header("Cache-Control", "private, no-store").header("X-Content-Type-Options", "nosniff").send(pdf);
+    } catch (error) {
+      if (error instanceof WordPreviewError) return reply.code(error.status).send(failure(request, error.code, error.message));
+      return reply.code(404).send(failure(request, "read_failed", "无法读取 Word 文档，请确认文件存在且可读取。"));
+    } finally {
+      convertingWord = false;
+    }
   });
 
   daemon.get<{ Querystring: { path?: string } }>("/api/fs/raw", async (request, reply) => {

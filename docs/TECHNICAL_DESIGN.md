@@ -391,6 +391,7 @@ GET  /api/fs/server-directories?path=
 POST /api/fs/server-directories
 GET  /api/fs/content?path=
 GET  /api/fs/raw?path=
+GET  /api/fs/word-preview?path=
 POST /api/commands
 DELETE /api/commands/:commandId
 
@@ -409,6 +410,8 @@ type ApiResponse<T> =
   | { ok: true; data: T; requestId: string }
   | { ok: false; error: { code: string; message: string; retryable: boolean }; requestId: string };
 ```
+
+预览文件流使用本机鉴权。`#page=N` 只在浏览器中用于定位 PDF 页码，传给文件接口和复制到剪贴板的都是不含页码片段的文件路径。PDF 阅读器按需加载并一次渲染一页。`.doc` 和 `.docx` 在 daemon 本机用临时 LibreOffice 配置转换，限制并发和转换时间，关闭宏、活动内容及自动链接更新；原文件仍通过下载接口提供。
 
 ### 8.2 WebSocket 客户端动作
 

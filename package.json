@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": { "node": ">=22.13.0" },
   "scripts": {
     "dev": "concurrently -k \"npm:dev:daemon\" \"npm:dev:web\"",
     "dev:daemon": "tsx apps/daemon/src/index.ts",
@@ -27,6 +28,7 @@
     "fastify": "^5.3.3",
     "katex": "^0.18.5",
     "lucide-react": "^0.468.0",
+    "pdfjs-dist": "6.5.438",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",

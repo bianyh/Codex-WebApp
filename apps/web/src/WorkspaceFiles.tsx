@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -25,6 +25,8 @@ import {
   X,
 } from "lucide-react";
 
+const DocumentPreview = lazy(() => import("./DocumentPreview"));
+
 export type FsEntry = {
   name: string;
   path: string;
@@ -37,7 +39,9 @@ export type FsEntry = {
     | "video"
     | "audio"
     | "pdf"
+    | "word"
     | "binary";
+  pdfPage?: number;
   size: number;
   modifiedAt: string;
   hidden: boolean;
@@ -119,7 +123,7 @@ function FileIcon({ entry, size = 15 }: { entry: FsEntry; size?: number }) {
   if (entry.kind === "audio") return <Music size={size} />;
   if (entry.kind === "text" || entry.kind === "markdown")
     return <FileCode2 size={size} />;
-  if (entry.kind === "pdf") return <FileText size={size} />;
+  if (entry.kind === "pdf" || entry.kind === "word") return <FileText size={size} />;
   return <File size={size} />;
 }
 
@@ -138,17 +142,19 @@ export function kindFromName(name: string): FsEntry["kind"] {
   if ([".mp4", ".webm", ".mov", ".m4v", ".ogv"].includes(extension)) return "video";
   if ([".mp3", ".wav", ".ogg", ".m4a", ".flac"].includes(extension)) return "audio";
   if (extension === ".pdf") return "pdf";
+  if (extension === ".doc" || extension === ".docx") return "word";
   if ([".zip", ".tar", ".gz", ".7z", ".bin", ".pt", ".pth", ".safetensors"].includes(extension)) return "binary";
   return "text";
 }
 
-export function fileEntryFromPath(filePath: string): FsEntry {
+export function fileEntryFromPath(filePath: string, pdfPage?: number): FsEntry {
   const name = filePath.split("/").pop() || filePath;
   return {
     name,
     path: filePath,
     type: "file",
     kind: kindFromName(name),
+    pdfPage,
     size: 0,
     modifiedAt: "",
     hidden: name.startsWith("."),
@@ -607,7 +613,15 @@ export function FilePreview({
           {entry.kind === "audio" && (
             <audio src={rawUrl} controls preload="metadata" />
           )}
-          {entry.kind === "pdf" && <iframe src={rawUrl} title={entry.name} />}
+          {(entry.kind === "pdf" || entry.kind === "word") && (
+            <Suspense fallback={<div className="preview-loading" role="status">正在加载文档预览</div>}>
+              <DocumentPreview
+                url={entry.kind === "word" ? `/api/fs/word-preview?path=${encodeURIComponent(entry.path)}` : rawUrl}
+                word={entry.kind === "word"}
+                initialPage={entry.pdfPage ?? 1}
+              />
+            </Suspense>
+          )}
           {entry.kind === "binary" && (
             <div className="unsupported-preview">
               <File size={34} />

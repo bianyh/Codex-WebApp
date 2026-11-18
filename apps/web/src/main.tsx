@@ -8,7 +8,7 @@ import React, {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
-import ReactMarkdown, { type ExtraProps } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -215,20 +215,21 @@ const MessageMarkdown = memo(function MessageMarkdown({ text, cwd, onOpenFile }:
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
+      urlTransform={(url, key) => key === "href" && onOpenFile && /^(?:file:\/\/\/|sandbox:\/)/i.test(url) && resolveLocalFileHref(url, cwd) ? url : defaultUrlTransform(url)}
       components={{
         pre: CopyableMarkdownBlock,
         a: ({ href, children, node: _node, ...props }) => {
-          const filePath = resolveLocalFileHref(href, cwd);
-          if (filePath && onOpenFile) {
+          const target = resolveLocalFileHref(href, cwd);
+          if (target && onOpenFile) {
             return (
               <a
                 {...props}
                 href={href}
-                title={`预览文件：${filePath}`}
+                title={`预览文件：${target.path}`}
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  onOpenFile(fileEntryFromPath(filePath));
+                  onOpenFile(fileEntryFromPath(target.path, target.pdfPage));
                 }}
               >
                 {children}
@@ -2284,6 +2285,7 @@ function App() {
       )}
       {previewEntry && (
         <FilePreview
+          key={`${previewEntry.path}:${previewEntry.pdfPage ?? ""}`}
           entry={previewEntry}
           onClose={() => setPreviewEntry(null)}
         />
