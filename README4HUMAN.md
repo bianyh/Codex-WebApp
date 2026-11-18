@@ -88,7 +88,7 @@ The new-thread dialog and Files panel can navigate to any server path available 
 
 PDF links such as `report.pdf#page=5` open at page 5. Scroll up or down to browse pages continuously. Use `−` and `+`, or hold Ctrl while scrolling over the document to zoom continuously around the pointer. Click the percentage to fit the width again. The viewer redraws visible content at the new scale instead of stretching the old bitmap.
 
-Word and PowerPoint share the viewer and use temporary PDF conversion on the server, one file at a time. Text retained in the preview can be selected and copied with the browser's native controls. Text inside images is not recognized. Input is limited to 25 MiB, the result to 50 MiB and conversion to 25 seconds. Available server fonts can affect layout. PowerPoint previews are static; animations, transitions, and embedded audio/video do not play. The download button still returns the original file.
+Word and PowerPoint share the viewer and convert to PDF locally. The first conversion runs while the PDF reader loads; simultaneous requests for the same unchanged file share the conversion. Reopening an unchanged file can reuse a result held in server memory for up to 15 minutes, with no preview cache written to disk. Input is limited to 25 MiB, the result to 50 MiB and conversion to 25 seconds. Text retained in the preview can be selected and copied; text inside images is not recognized. Available server fonts can affect layout. PowerPoint previews are static; animations, transitions, and embedded audio/video do not play. The download button still returns the original file.
 
 ### Custom models and providers
 

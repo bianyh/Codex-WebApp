@@ -28,6 +28,15 @@ import {
 
 const DocumentPreview = lazy(() => import("./DocumentPreview"));
 
+async function requestOfficePdf(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
+  const response = await fetch(url, { credentials: "same-origin", signal });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error?.message || "无法转换预览，请下载原文件查看。");
+  }
+  return response.arrayBuffer();
+}
+
 export type FsEntry = {
   name: string;
   path: string;
@@ -544,11 +553,22 @@ export function FilePreview({
   );
   const [error, setError] = useState("");
   const [copiedPath, setCopiedPath] = useState(false);
+  const [officeRequest, setOfficeRequest] = useState<{ url: string; data: Promise<ArrayBuffer> }>();
   const lineCount = content?.content.split(/\r?\n/).length;
   const rawUrl = `/api/fs/raw?path=${encodeURIComponent(entry.path)}`;
   const office = entry.kind === "word" || entry.kind === "presentation" ? entry.kind : undefined;
   const isDocument = entry.kind === "pdf" || Boolean(office);
   const documentUrl = office ? `/api/fs/${office}-preview?path=${encodeURIComponent(entry.path)}` : rawUrl;
+  const officeData = officeRequest?.url === documentUrl ? officeRequest.data : undefined;
+  useEffect(() => {
+    if (!office) return;
+    const controller = new AbortController();
+    const data = requestOfficePdf(documentUrl, controller.signal);
+    void data.catch(() => {});
+    setOfficeRequest({ url: documentUrl, data });
+    return () => controller.abort();
+  }, [office, documentUrl]);
+
   useEffect(() => {
     if (entry.kind !== "text" && entry.kind !== "markdown") return;
     setLoading(true);
@@ -621,12 +641,13 @@ export function FilePreview({
             <audio src={rawUrl} controls preload="metadata" />
           )}
           {isDocument && (
-            <Suspense fallback={<div className="preview-loading" role="status">正在加载文档预览</div>}>
-              <DocumentPreview
-                url={documentUrl}
+            <Suspense fallback={<div className="document-preview-pending"><div className="preview-loading" role="status">正在加载文档预览</div></div>}>
+              {(!office || officeData) && <DocumentPreview
+                url={rawUrl}
                 office={office}
+                officeData={officeData}
                 initialPage={entry.pdfPage ?? 1}
-              />
+              />}
             </Suspense>
           )}
           {entry.kind === "binary" && (

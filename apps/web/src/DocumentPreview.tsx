@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ChevronLeft, ChevronRight, LoaderCircle, Minus, Plus } from "lucide-react";
-import { AnnotationMode, getDocument, GlobalWorkerOptions, TextLayer, type PDFDocumentLoadingTask, type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { AnnotationMode, getDocument, GlobalWorkerOptions, PDFWorker, TextLayer, type PDFDocumentLoadingTask, type PDFDocumentProxy, type PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 import workerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { pdfLayout, pdfPageAt, pdfTiles, type PdfPageBox, type PdfTileBox, type PdfViewport } from "./pdfLayout";
 
@@ -25,25 +25,19 @@ class PdfResources {
   }
 }
 
-export default function DocumentPreview({ url, office, initialPage }: { url: string; office?: "word" | "presentation"; initialPage: number }) {
+export default function DocumentPreview({ url, office, officeData, initialPage }: { url: string; office?: "word" | "presentation"; officeData?: Promise<ArrayBuffer>; initialPage: number }) {
   const [document, setDocument] = useState<{ pdf: PDFDocumentProxy; page: number; ratio: number }>();
   const [loadingError, setLoadingError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
+    const worker = officeData ? new PDFWorker() : undefined;
+    void worker?.promise.catch(() => {});
     let loadingTask: PDFDocumentLoadingTask | undefined;
     void (async () => {
-      let source: { data: ArrayBuffer } | { url: string } = { url };
-      if (office) {
-        const response = await fetch(url, { credentials: "same-origin", signal: controller.signal });
-        if (!response.ok) {
-          const body = await response.json().catch(() => null);
-          throw new Error(body?.error?.message || "无法转换预览，请下载原文件查看。");
-        }
-        source = { data: await response.arrayBuffer() };
-      }
+      const source = officeData ? { data: await officeData } : { url };
       if (controller.signal.aborted) return;
-      loadingTask = getDocument({ ...source, BinaryDataFactory: PdfResources, useWorkerFetch: false, enableXfa: false });
+      loadingTask = getDocument({ ...source, worker, BinaryDataFactory: PdfResources, useWorkerFetch: false, enableXfa: false });
       const pdf = await loadingTask.promise;
       const page = Math.min(initialPage, pdf.numPages);
       const { width, height } = (await pdf.getPage(page)).getViewport({ scale: 1 });
@@ -56,9 +50,10 @@ export default function DocumentPreview({ url, office, initialPage }: { url: str
     });
     return () => {
       controller.abort();
-      void loadingTask?.destroy().catch(() => {});
+      if (loadingTask) void loadingTask.destroy().catch(() => {}).finally(() => worker?.destroy());
+      else worker?.destroy();
     };
-  }, [url, office, initialPage]);
+  }, [url, office, officeData, initialPage]);
 
   if (document) return <PdfReader pdf={document.pdf} initialPage={document.page} fallbackRatio={document.ratio} />;
   return <div className="document-preview-pending">

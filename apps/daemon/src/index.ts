@@ -23,7 +23,7 @@ import { ThreadIndexReconciler } from "./threadIndex.js";
 import { threadForkSchema } from "./threadFork.js";
 import { runWorkspaceCommand } from "./workspaceCommand.js";
 import { resolveServerDirectory, resolveServerPath } from "./serverDirectory.js";
-import { officePreviewKind, renderOfficePreview, OfficePreviewError } from "./officePreview.js";
+import { officePreviewKind, OfficePreviewCache, OfficePreviewError } from "./officePreview.js";
 import type { ConsoleEvent, GoalState, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
 
 const daemon = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
@@ -47,7 +47,7 @@ const turnOperations = new Map<string, Promise<void>>();
 let refreshingActivities: Promise<void> | null = null;
 let cachedOfficialModels: ModelOption[] = [];
 const runningCommands = new Map<string, AbortController>();
-let convertingOffice = false;
+const officePreviews = new OfficePreviewCache();
 const activityTracker = new ThreadActivityTracker(
   (threadId, turnId) => codex.ownsTurn(threadId, turnId),
   (rolloutPath) => externalCodex.ownerFor(rolloutPath),
@@ -779,16 +779,12 @@ async function buildServer(): Promise<void> {
     daemon.get<{ Querystring: { path?: string } }>(route, async (request, reply) => {
       if (!(await requireAuth(request, reply))) return;
       if (typeof request.query.path !== "string" || !request.query.path) return reply.code(400).send(failure(request, "missing_path", "缺少文件路径"));
-      if (convertingOffice) return reply.code(429).send(failure(request, "preview_busy", "正在转换另一个文件，请稍后重试", true));
-      convertingOffice = true;
       try {
-        const pdf = await renderOfficePreview(request.query.path, config.codexCwd, config.libreOfficeCommand, kind);
+        const pdf = await officePreviews.render(request.query.path, config.codexCwd, config.libreOfficeCommand, kind);
         return reply.type("application/pdf").header("Cache-Control", "private, no-store").header("X-Content-Type-Options", "nosniff").send(pdf);
       } catch (error) {
-        if (error instanceof OfficePreviewError) return reply.code(error.status).send(failure(request, error.code, error.message));
+        if (error instanceof OfficePreviewError) return reply.code(error.status).send(failure(request, error.code, error.message, error.status === 429 || error.status === 409));
         return reply.code(404).send(failure(request, "read_failed", "无法读取预览文件，请确认文件存在且可读取。"));
-      } finally {
-        convertingOffice = false;
       }
     });
   }

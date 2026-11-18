@@ -139,6 +139,24 @@ test("a Word link reports converter errors and keeps the original download avail
   expect(requests).toEqual(["/tmp/报告.doc"]);
 });
 
+test("PowerPoint conversion starts without waiting for the PDF reader bundle", async ({ page }) => {
+  const requests = await openConsole(page);
+  const releaseBundle = Promise.withResolvers<void>();
+  await page.route(/\/assets\/DocumentPreview-[^/]+\.js$/, async (route) => {
+    await releaseBundle.promise;
+    await route.fallback();
+  });
+  try {
+    await page.getByRole("link", { name: "PPT 旧格式" }).click();
+    await expect.poll(() => requests).toEqual([legacyPresentationPath]);
+  } finally {
+    releaseBundle.resolve();
+  }
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("region", { name: "文档第 1 页" }).locator("canvas:visible").first()).toBeInViewport();
+  expect(requests).toEqual([legacyPresentationPath]);
+});
+
 test("PowerPoint files open from both the Files panel and conversation links", async ({ page }) => {
   const requests = await openConsole(page, true, 2);
   await page.locator(".context-desktop").getByRole("button", { name: "Files", exact: true }).click();
