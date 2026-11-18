@@ -37,7 +37,7 @@ official codex app-server -> local projects and tools
 - View and manage thread goals, including pause/resume, objective editing, token budgets, and confirmed deletion; external-writer goals remain read-only.
 - Inspect, edit, cancel, and reorder pending instructions; choose next-turn reasoning effort, service tier, and native plan/execution mode.
 - Display effective runtime settings and model rerouting, context-window pressure and compaction, account quotas, and read-only MCP/Skills/plugin/hook status.
-- Rename and branch conversations, browse/search paginated recent or archived threads, and restore archives.
+- Rename conversations, branch before or after a chosen conversation turn from a message, browse/search paginated recent or archived threads, and restore archives.
 - Structured sub-agent, web-search, image, review, compaction and tool timing/exit-code cards.
 - Separate user, execution-progress, and final-answer messages, with collapsible execution details.
 - Markdown/GFM and LaTeX/KaTeX rendering.

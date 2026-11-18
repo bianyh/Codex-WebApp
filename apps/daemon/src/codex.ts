@@ -4,9 +4,10 @@ import { createInterface } from "node:readline";
 import type { AdapterCapabilities, ConsoleEvent, Goal, ModelOption, PendingRequest, ThreadSnapshot, ThreadSummary, TimelineItem, ThreadStatus, TurnInput } from "./types.js";
 import { config } from "./config.js";
 import { goalFromRaw, goalUpdateSchema, type GoalUpdate } from "./goal.js";
-import { mapTokenUsage, runtimeSettingsFromRaw, structuredItem } from "./runtimeMapping.js";
+import { hiddenAgentMessageNotice, itemStartedAtFromRaw, mapTokenUsage, runtimeSettingsFromRaw, structuredItem, timestampToIso } from "./runtimeMapping.js";
 import { executionParams } from "./executionSettings.js";
 import type { ExecutionSettings, RuntimeSettings } from "./types.js";
+import { threadForkSchema, type ThreadForkInput } from "./threadFork.js";
 
 type RpcResponse = { id?: string | number; result?: unknown; error?: { code?: number; message?: string; data?: unknown } };
 type RpcNotification = { method: string; id?: string | number; params?: Record<string, unknown> };
@@ -105,28 +106,22 @@ function summaryFromRaw(raw: unknown): ThreadSummary {
   };
 }
 
-function timestampToIso(value: unknown): string | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
-    const date = new Date(milliseconds);
-    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
-  }
-  if (typeof value === "string") {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
-  }
-  return undefined;
+function publicItem(raw: unknown): unknown {
+  const notice = hiddenAgentMessageNotice(raw);
+  if (!notice) return raw;
+  const { id, phase, startedAtMs, completedAtMs } = raw as Record<string, unknown>;
+  return { type: "agentMessage", id, phase, startedAtMs, completedAtMs, text: notice };
 }
 
 function itemFromRaw(raw: unknown, fallbackCreatedAt?: string): TimelineItem {
   const value = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const type = String(value.type ?? "unknown");
   const id = String(value.id ?? randomUUID());
-  const createdAt = timestampToIso(value.createdAt ?? value.timestamp) ?? fallbackCreatedAt;
+  const createdAt = itemStartedAtFromRaw(value) ?? fallbackCreatedAt;
   const structured = structuredItem(value);
   if (structured?.kind) return { id, kind: structured.kind, createdAt, ...structured };
   if (type === "userMessage") return { id, kind: "user", createdAt, text: textFromContent(value.content) };
-  if (type === "agentMessage") return { id, kind: "agent", createdAt, text: typeof value.text === "string" ? value.text : textFromContent(value.content), status: typeof value.phase === "string" ? value.phase : undefined };
+  if (type === "agentMessage") return { id, kind: "agent", createdAt, text: hiddenAgentMessageNotice(value) ?? (typeof value.text === "string" ? value.text : textFromContent(value.content)), status: typeof value.phase === "string" ? value.phase : undefined };
   if (type === "reasoning") return { id, kind: "reasoning", createdAt, text: typeof value.text === "string" ? value.text : textFromContent(value.summary) || textFromContent(value.content), title: "Reasoning" };
   if (type === "commandExecution" || type === "command_execution") return { id, kind: "command", createdAt, command: typeof value.command === "string" ? value.command : undefined, output: typeof value.aggregatedOutput === "string" ? value.aggregatedOutput : typeof value.output === "string" ? value.output : undefined, status: typeof value.status === "string" ? value.status : undefined, title: "Command", exitCode: typeof value.exitCode === "number" ? value.exitCode : undefined, durationMs: typeof value.durationMs === "number" ? value.durationMs : undefined };
   if (type === "fileChange" || type === "file_change") {
@@ -148,10 +143,13 @@ function snapshotFromRaw(raw: Record<string, unknown>): ThreadSnapshot {
   const items = turns.flatMap((turn) => {
     const value = (turn && typeof turn === "object" ? turn : {}) as Record<string, unknown>;
     const startedAt = timestampToIso(value.startedAt) ?? summary.updatedAt;
-    const mapped = Array.isArray(value.items) ? value.items.map((item) => itemFromRaw(item, startedAt)) : [];
+    const mapped = Array.isArray(value.items) ? value.items.map((item) => ({
+      ...itemFromRaw(item, startedAt),
+      turnId: typeof value.id === "string" ? value.id : undefined,
+    })) : [];
     const lastAgent = [...mapped].reverse().find((item) => item.kind === "agent");
     if (lastAgent && !lastAgent.status && value.status === "completed") lastAgent.status = "final_answer";
-    if (value.error) mapped.push({ id: `codex-error-${String(value.id ?? randomUUID())}`, kind: "system", createdAt: startedAt, title: "Codex 错误", text: errorTextFromRaw(value.error), status: "failed" });
+    if (value.error) mapped.push({ id: `codex-error-${String(value.id ?? randomUUID())}`, turnId: typeof value.id === "string" ? value.id : undefined, kind: "system", createdAt: startedAt, title: "Codex 错误", text: errorTextFromRaw(value.error), status: "failed" });
     if (value.status === "inProgress" && typeof value.id === "string") summary.activeTurnId = value.id;
     return mapped;
   });
@@ -215,7 +213,7 @@ export class CodexProcess {
   async tryTakeControl(threadId: string): Promise<boolean> {
     if (this.loadedThreads.has(threadId)) return true;
     try {
-      const result = await this.request("thread/resume", { threadId });
+      const result = await this.request("thread/resume", { threadId, excludeTurns: true });
       this.settings.set(threadId, runtimeSettingsFromRaw(result));
       this.loadedThreads.add(threadId);
       return true;
@@ -323,13 +321,25 @@ export class CodexProcess {
   }
 
   async listThreads(cwd?: string): Promise<ThreadSummary[]> {
-    const result = await this.request("thread/list", { cwd: cwd ?? null, limit: 100, sortKey: "updated_at" });
+    const result = await this.request("thread/list", { cwd: cwd ?? null, limit: 100, sortKey: "updated_at", useStateDbOnly: true });
     const data = (result && typeof result === "object" ? (result as Record<string, unknown>).data : []) as unknown[];
     return Array.isArray(data) ? data.map(summaryFromRaw).filter((item) => item.id) : [];
   }
 
-  async listThreadPage(input: { cwd?: string; cursor?: string; archived?: boolean; searchTerm?: string }): Promise<{ threads: ThreadSummary[]; nextCursor: string | null }> {
-    const result = await this.request("thread/list", { ...input, limit: 100, sortKey: "updated_at" }) as { data?: unknown[]; nextCursor?: string };
+  async listThreadPage(
+    input: { cwd?: string; cursor?: string; archived?: boolean; searchTerm?: string },
+    options: { useStateDbOnly?: boolean } = {},
+  ): Promise<{ threads: ThreadSummary[]; nextCursor: string | null }> {
+    // The normal thread/list path scans and repairs every rollout JSONL file. On
+    // machines with a large Codex history that makes the first screen wait many
+    // seconds. The state database has the same ordered summaries and is safe for
+    // the interactive list; callers can opt into the slower reconciliation pass.
+    const result = await this.request("thread/list", {
+      ...input,
+      limit: 100,
+      sortKey: "updated_at",
+      useStateDbOnly: options.useStateDbOnly ?? true,
+    }) as { data?: unknown[]; nextCursor?: string };
     return { threads: (result.data ?? []).map(summaryFromRaw).filter((thread) => thread.id), nextCursor: result.nextCursor ?? null };
   }
 
@@ -443,11 +453,17 @@ export class CodexProcess {
   async archiveThread(threadId: string): Promise<void> { await this.request("thread/archive", { threadId }); }
   async unarchiveThread(threadId: string): Promise<void> { await this.request("thread/unarchive", { threadId }); }
 
-  async forkThread(threadId: string, lastTurnId?: string): Promise<ThreadSnapshot> {
-    const result = await this.request("thread/fork", { threadId, ...(lastTurnId ? { lastTurnId } : {}), excludeTurns: true }) as { thread: { id: string } };
+  async forkThread(threadId: string, input: ThreadForkInput = {}): Promise<ThreadSnapshot> {
+    const boundary = threadForkSchema.parse(input);
+    const result = await this.request("thread/fork", {
+      threadId, ...boundary, excludeTurns: true, deferGoalContinuation: true,
+    }) as { thread: { id: string } };
+    if (!result.thread?.id || result.thread.id === threadId) throw new Error("Codex 未返回有效的新分支");
     this.loadedThreads.add(result.thread.id);
     this.settings.set(result.thread.id, runtimeSettingsFromRaw(result));
-    return this.readThread(result.thread.id);
+    const snapshot = await this.readThread(result.thread.id);
+    snapshot.thread.canRetry = true;
+    return snapshot;
   }
   async startTurn(threadId: string, input: TurnInput, settings?: ExecutionSettings): Promise<unknown> {
     await this.ensureLoaded(threadId);
@@ -499,7 +515,7 @@ export class CodexProcess {
   private async startIfNeeded(method: string): Promise<void> { if (!this.child && method !== "initialize") await this.start(); }
   private async ensureLoaded(threadId: string): Promise<void> {
     if (this.loadedThreads.has(threadId)) return;
-    const result = await this.request("thread/resume", { threadId });
+    const result = await this.request("thread/resume", { threadId, excludeTurns: true });
     this.settings.set(threadId, runtimeSettingsFromRaw(result));
     this.loadedThreads.add(threadId);
   }
@@ -573,7 +589,15 @@ export class CodexProcess {
   }
 
   private emit(raw: { sourceMethod: string; params: Record<string, unknown> }): void {
-    const params = raw.params;
+    let params = raw.params;
+    if (params.item) {
+      const item = publicItem(params.item);
+      if (item !== params.item) params = { ...params, item };
+    }
+    if (params.turn && typeof params.turn === "object") {
+      const turn = params.turn as Record<string, unknown>;
+      if (Array.isArray(turn.items)) params = { ...params, turn: { ...turn, items: turn.items.map(publicItem) } };
+    }
     const threadValue = params.thread;
     const threadId = typeof params.threadId === "string" ? params.threadId : threadValue && typeof threadValue === "object" && typeof (threadValue as Record<string, unknown>).id === "string" ? String((threadValue as Record<string, unknown>).id) : undefined;
     const event: ConsoleEvent = { eventId: randomUUID(), threadId, sourceMethod: raw.sourceMethod, receivedAt: new Date().toISOString(), event: params };

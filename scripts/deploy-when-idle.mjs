@@ -41,6 +41,22 @@ async function run(command, args) {
   });
 }
 
+export function deploymentEnvironment(environment, { current, revision, codexCommand }) {
+  if (codexCommand !== undefined && (!path.isAbsolute(codexCommand) || /[\r\n\0]/.test(codexCommand))) throw new Error("Codex command must be an absolute executable path");
+  const cleaned = environment.replace(/^CODEX_CONSOLE_(RELEASE_DIR|BUILD_REVISION)=.*\n?/gm, "");
+  const base = codexCommand ? cleaned.replace(/^CODEX_COMMAND=.*\n?/gm, "") : cleaned;
+  return base.trimEnd() + `\nCODEX_CONSOLE_RELEASE_DIR=${current}\nCODEX_CONSOLE_BUILD_REVISION=${revision}\n` + (codexCommand ? `CODEX_COMMAND=${JSON.stringify(codexCommand)}\n` : "");
+}
+
+export async function validateCodexCommand(command, expectedVersion) {
+  if (!path.isAbsolute(command) || /[\r\n\0]/.test(command)) throw new Error("Codex command must be an absolute executable path");
+  const executable = await realpath(command);
+  if (!(await stat(executable)).isFile()) throw new Error("Codex command is not a file");
+  const version = (await run(executable, ["--version"])).match(/^codex-cli ([^\s]+)$/m)?.[1];
+  if (!version || (expectedVersion && version !== expectedVersion)) throw new Error("Unexpected Codex command version");
+  return executable;
+}
+
 async function deploy() {
   const repo = await realpath(process.cwd());
   if (!process.env.CODEX_CONSOLE_BUILD_DIR) throw new Error("Set CODEX_CONSOLE_BUILD_DIR to a validated staged build outside the checkout");
@@ -64,6 +80,8 @@ async function deploy() {
   const unitTemplate = await readFile(path.join(repo, "deploy/codex-console.service"), "utf8");
   const environment = await readFile(environmentPath, "utf8");
   const originalUnit = await readFile(unitPath, "utf8");
+  const requestedCommand = process.env.CODEX_CONSOLE_DEPLOY_CODEX_COMMAND;
+  const codexCommand = requestedCommand ? await validateCodexCommand(requestedCommand, process.env.CODEX_CONSOLE_EXPECTED_VERSION) : undefined;
   const configuredPort = environment.match(/^CODEX_CONSOLE_PORT=(\d+)$/m)?.[1] ?? "8787";
   const healthUrl = `http://127.0.0.1:${configuredPort}/api/healthz`;
   const readHealth = async () => {
@@ -87,12 +105,13 @@ async function deploy() {
   } while (!isIdleHealth(await readHealth().catch(() => undefined)));
   if (!(await run("systemctl", ["--user", "is-active", service])).includes("active")) throw new Error("Service is not active; refusing automatic replacement");
   if (await readFile(environmentPath, "utf8") !== environment || await readFile(unitPath, "utf8") !== originalUnit) throw new Error("Service configuration changed while waiting; schedule a new deployment to preserve it");
+  if (codexCommand) await validateCodexCommand(codexCommand, process.env.CODEX_CONSOLE_EXPECTED_VERSION);
   await mkdir(path.join(stateDir, "backups"), { recursive: true, mode: 0o700 });
   await writeFile(path.join(stateDir, "backups", `${suffix}.environment`), environment, { mode: 0o600 });
   await writeFile(path.join(stateDir, "backups", `${suffix}.service`), originalUnit, { mode: 0o600 });
   const escapedRepo = repo.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"');
   const unit = unitTemplate.replace("[Unit]\n", `[Unit]\nRequiresMountsFor="${escapedRepo}"\n`);
-  const updatedEnvironment = environment.replace(/^CODEX_CONSOLE_(RELEASE_DIR|BUILD_REVISION)=.*\n?/gm, "").trimEnd() + `\nCODEX_CONSOLE_RELEASE_DIR=${current}\nCODEX_CONSOLE_BUILD_REVISION=${revision}\n`;
+  const updatedEnvironment = deploymentEnvironment(environment, { current, revision, codexCommand });
   const installFile = async (filename, content) => {
     const temporary = `${filename}.${suffix}.tmp`;
     await writeFile(temporary, content, { mode: 0o600 });

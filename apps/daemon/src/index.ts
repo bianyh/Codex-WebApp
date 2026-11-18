@@ -19,6 +19,8 @@ import { inventoryFromRaw, quotasFromRaw, runtimeSettingsFromRaw } from "./runti
 import type { ExecutionSettings, QueueEntry, RuntimeInventory } from "./types.js";
 import { ExternalCodexController } from "./externalCodex.js";
 import { ThreadActivityTracker, type ThreadActivity } from "./threadActivity.js";
+import { ThreadIndexReconciler } from "./threadIndex.js";
+import { threadForkSchema } from "./threadFork.js";
 import { runWorkspaceCommand } from "./workspaceCommand.js";
 import { resolveServerDirectory, resolveServerPath } from "./serverDirectory.js";
 import type { ConsoleEvent, GoalState, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
@@ -48,6 +50,11 @@ const activityTracker = new ThreadActivityTracker(
   (threadId, turnId) => codex.ownsTurn(threadId, turnId),
   (rolloutPath) => externalCodex.ownerFor(rolloutPath),
 );
+const threadIndex = new ThreadIndexReconciler({
+  scan: (archived) => codex.listThreadPage({ archived }, { useStateDbOnly: false }),
+  updated: (archived) => broadcast({ type: "thread_index_updated", archived }),
+  failed: () => daemon.log.warn("后台线程索引补全失败；快速列表仍可用，稍后将重试"),
+});
 let startedAt = Date.now();
 
 function isTurnActiveStatus(status: ThreadStatus): boolean {
@@ -328,7 +335,7 @@ function updateSnapshot(event: ConsoleEvent): void {
   } else if (method === "item/agentMessage/delta") {
     const itemId = String(params.itemId ?? params.id ?? "streaming-agent");
     let item = snapshot.items.find((candidate) => candidate.id === itemId);
-    if (!item) { item = { id: itemId, kind: "agent", text: "" }; snapshot.items.push(item); }
+    if (!item) { item = { id: itemId, turnId: turnId ?? snapshot.thread.activeTurnId, kind: "agent", text: "" }; snapshot.items.push(item); }
     item.text = `${item.text ?? ""}${String(params.delta ?? params.text ?? "")}`;
   } else if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta") {
     const itemId = String(params.itemId ?? params.id ?? "streaming-reasoning");
@@ -352,6 +359,7 @@ function updateSnapshot(event: ConsoleEvent): void {
     item.diff = `${item.diff ?? ""}${String(params.delta ?? "")}`;
   } else if ((method === "item/started" || method === "item/completed") && params.item && typeof params.item === "object") {
     const mapped = itemFromRaw(params.item, event.receivedAt);
+    mapped.turnId = turnId ?? snapshot.thread.activeTurnId;
     if (mapped.kind === "compaction") { mapped.status = method === "item/completed" ? "completed" : "inProgress"; mapped.text = method === "item/completed" ? "上下文压缩完成" : "正在压缩上下文"; snapshot.compaction = method === "item/completed" ? "completed" : "running"; if (method === "item/completed") activeCompactions.delete(event.threadId); else activeCompactions.add(event.threadId); }
     const index = snapshot.items.findIndex((candidate) => candidate.id === mapped.id);
     if (index >= 0) snapshot.items[index] = { ...snapshot.items[index], ...mapped };
@@ -418,7 +426,7 @@ async function refreshThreadActivities(): Promise<void> {
     thread.activitySource = activity.activitySource;
     const snapshot = snapshots.get(thread.id);
     if (snapshot) snapshot.thread = { ...snapshot.thread, ...thread };
-    if (changed) broadcast({ type: "thread_activity", activity }, undefined);
+    if (changed) broadcast({ type: "thread_activity", activity: { ...activity, canRetry: thread.canRetry } }, undefined);
 
     const isObservedExternalRun = activity.status === "running" && activity.activitySource === "external" && [...subscriptions.values()].includes(thread.id);
     const justFinishedExternalRun = changed && previous?.status === "running" && activity.status !== "running" && [...subscriptions.values()].includes(thread.id);
@@ -500,6 +508,7 @@ async function buildServer(): Promise<void> {
   activityTimer.unref();
   daemon.addHook("onClose", async () => {
     clearInterval(activityTimer);
+    threadIndex.close();
     for (const controller of runningCommands.values()) controller.abort();
     runningCommands.clear();
   });
@@ -818,10 +827,30 @@ async function buildServer(): Promise<void> {
   daemon.get<{ Querystring: { cwd?: string; cursor?: string; archived?: string; search?: string; page?: string } }>("/api/threads", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
     try {
-      const page = await codex.listThreadPage({ cwd: request.query.cwd, cursor: request.query.cursor, archived: request.query.archived === "true", searchTerm: request.query.search?.slice(0, 200) });
-      const threads = await Promise.all(page.threads.map(async (thread) => { if (request.query.archived === "true") archivedIds.add(thread.id); else archivedIds.delete(thread.id); knownThreads.set(thread.id, thread); const result = await activityTracker.enrich(thread); result.canRetry = !isTurnActiveStatus(result.status) && codex.controlsThread(result.id); knownThreads.set(result.id, result); return publicThread(result); }));
+      const archived = request.query.archived === "true";
+      const page = await codex.listThreadPage({ cwd: request.query.cwd, cursor: request.query.cursor, archived, searchTerm: request.query.search?.slice(0, 200) });
+      const threads = page.threads.map((thread) => {
+        if (archived) archivedIds.add(thread.id); else archivedIds.delete(thread.id);
+        // Do not make the first screen wait for N rollout tails and /proc owner
+        // checks. Reuse the last observation, then push fresh activity over WS.
+        const activity = lastActivities.get(thread.id);
+        const result = { ...thread, ...(activity ? {
+          status: activity.status, activeTurnId: activity.activeTurnId,
+          canInterrupt: activity.canInterrupt, activitySource: activity.activitySource,
+        } : {}), canRetry: !archived && !isTurnActiveStatus(activity?.status ?? thread.status) && codex.controlsThread(thread.id) };
+        knownThreads.set(result.id, result);
+        return publicThread(result);
+      });
+      scheduleThreadActivityRefresh();
+      threadIndex.request(archived);
       return ok(request, request.query.page === "true" ? { threads, nextCursor: page.nextCursor } : threads);
     } catch (error) { return reply.code(503).send(failure(request, "codex_unavailable", error instanceof Error ? error.message : "Codex 不可用", true)); }
+  });
+  daemon.post<{ Body: { archived?: boolean } }>("/api/threads/refresh", async (request, reply) => {
+    if (!(await requireAuth(request, reply))) return;
+    const parsed = z.object({ archived: z.boolean().optional() }).safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send(failure(request, "invalid_refresh", "线程筛选必须有效"));
+    return ok(request, { scheduled: threadIndex.request(parsed.data.archived ?? false, true) });
   });
   daemon.get<{ Params: { threadId: string } }>("/api/threads/:threadId", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
@@ -837,7 +866,11 @@ async function buildServer(): Promise<void> {
       snapshot.thread.canRetry = !archivedIds.has(snapshot.thread.id) && !isTurnActiveStatus(snapshot.thread.status) && codex.controlsThread(snapshot.thread.id);
       knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot);
       return ok(request, publicSnapshot(snapshot));
-    } catch (error) { return reply.code(404).send(failure(request, "thread_not_found", error instanceof Error ? error.message : "线程不存在")); }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法读取线程";
+      const missing = /not found|does not exist|no rollout found|invalid thread id|thread not loaded|线程不存在/i.test(message);
+      return reply.code(missing ? 404 : 503).send(failure(request, missing ? "thread_not_found" : "thread_read_failed", message, !missing));
+    }
   });
   daemon.post<{ Body: { cwd?: string; model?: string; sandbox?: string; approvalPolicy?: string } }>("/api/threads", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
@@ -887,9 +920,19 @@ async function buildServer(): Promise<void> {
   });
   daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/fork", async (request, reply) => {
     if (!(await requireAuth(request, reply))) return;
-    const parsed = z.object({ lastTurnId: z.string().min(1).optional() }).safeParse(request.body ?? {});
+    const parsed = threadForkSchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.code(400).send(failure(request, "invalid_fork", "分支设置无效"));
-    try { let snapshot: ThreadSnapshot | undefined; await serializeTurnOperation(request.params.threadId, async () => { const thread = knownThreads.get(request.params.threadId) ?? summaryFromRaw((await codex.request("thread/read", { threadId: request.params.threadId, includeTurns: false }) as { thread: unknown }).thread); if (activeCompactions.has(request.params.threadId) || (thread && isTurnActiveStatus((await activityTracker.inspect(thread)).status))) throw new Error("请先结束当前任务，再创建分支"); snapshot = await codex.forkThread(request.params.threadId, parsed.data.lastTurnId); knownThreads.set(snapshot.thread.id, snapshot.thread); snapshots.set(snapshot.thread.id, snapshot); }); return ok(request, publicSnapshot(snapshot!)); }
+    try {
+      let snapshot: ThreadSnapshot | undefined;
+      await serializeTurnOperation(request.params.threadId, async () => {
+        const thread = knownThreads.get(request.params.threadId) ?? summaryFromRaw((await codex.request("thread/read", { threadId: request.params.threadId, includeTurns: false }) as { thread: unknown }).thread);
+        if (activeCompactions.has(thread.id) || queuedTurns.get(thread.id)?.length || isTurnActiveStatus((await activityTracker.inspect(thread)).status)) throw new Error("请先结束当前任务并处理排队指令，再创建分支");
+        snapshot = await codex.forkThread(thread.id, parsed.data);
+        knownThreads.set(snapshot.thread.id, snapshot.thread);
+        snapshots.set(snapshot.thread.id, snapshot);
+      });
+      return ok(request, publicSnapshot(snapshot!));
+    }
     catch (error) { return reply.code(409).send(failure(request, "fork_failed", error instanceof Error ? error.message : "无法创建分支")); }
   });
   daemon.post<{ Params: { threadId: string } }>("/api/threads/:threadId/compact", async (request, reply) => {

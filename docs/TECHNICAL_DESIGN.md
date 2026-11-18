@@ -14,7 +14,7 @@
 
 OpenAI Docs 在当前网络环境下无法直接抓取正文，官方页面可能返回访问拦截页。因此，实际协议以运行时安装的 Codex 版本通过 `generate-ts`/`generate-json-schema` 生成的产物为准；升级时再用 [OpenAI Docs - Codex](https://developers.openai.com/codex) 核对语义和兼容性。本文不把实验性协议字段当作跨版本稳定 API。
 
-原始设计基线为 `codex-cli 0.115.0`；当前兼容性验证版本为 `0.162.1`。`codex app-server` 及协议仍属于 experimental，必须记录能力集并维护兼容测试。
+原始设计基线为 `codex-cli 0.115.0`；当前兼容性验证版本为 `0.170.0`。`codex app-server` 及协议仍属于 experimental，必须记录能力集并维护兼容测试。
 
 ## 2. 目标和非目标
 
@@ -200,11 +200,13 @@ interface CodexAdapter {
 
 ### 5.3 第一版使用的方法和事件
 
-#### 0.162.1 兼容约定
+#### 0.162.1 至 0.170.0 的兼容约定
 
 - `thread/rollback` 已移除。分页线程先通过 `thread/turns/list` 找到最后一轮，再发送 `thread/revert {threadId,beforeTurnId}`；此操作只调整会话历史，不撤销文件修改。
 - `historyMode=legacy` 不能使用 `thread/revert`。旧版服务器保留原有 rollback；新版服务器改为 `thread/fork {threadId,lastTurnId}` 保留截至上一轮的历史，第一轮重发创建同目录和模型/审批/沙箱设置的新线程。原线程不被截断，前端通过 `replacesThreadId` 切换订阅。
 - 分页历史使用 `thread/read includeTurns=false` 获取元数据，通过 `thread/turns/list itemsView=full` 顺序读取所有页。未持久化的新线程可能尚无分页历史，按空历史处理。
+- 新版按消息提供毫秒级 `startedAtMs`；历史优先读取该字段，实时展示使用开始事件时间，完成通知不会把它替换为完成时间。旧历史仍回退到既有时间字段。
+- `0.170.0` 的回复展示标记为 `hide` 或 `block` 时，daemon 将对应历史项和包含该项的实时通知替换为占位提示，不转发该项的原文或私有展示元数据。
 - Plan 的步骤为 `{step,status}`；Token 用量为 `{total:{inputTokens,outputTokens,totalTokens},last:...}`；文件修改类型为 `{type,move_path?}`。daemon 与前端均规范化为稳定领域字段，不把对象直接渲染为数字或状态文字。
 - 权限请求回复 `{permissions,scope:"turn"}`，MCP elicitation 回复 `{action,content,_meta}`，不是通用 `{decision}`。所有 pending 请求保存在进程适配层，刷新和重新订阅时恢复；未知请求返回 JSON-RPC 错误，避免永久等待。
 - 普通 HTTP 局域网可能没有 `crypto.randomUUID`。所有前端本地 ID 复用兼容生成器；React 错误边界提供重载入口。发送失败显示错误并恢复文本，不允许错误展示自身导致黑屏。
@@ -236,6 +238,12 @@ Goal 状态独立于 Turn。daemon 的认证 `GET/PATCH/DELETE /api/threads/:thr
 页面打开或刷新读取当前目标，处理目标通知实时更新；外部 CLI 没有共享 daemon 通知时每 5 秒只读轮询，切回可见页面立即同步。其他进程持有 writer 时允许展示，禁止强制关闭 CLI。暂停/删除只操作目标，不使用进程信号，立即停止消息仍使用已有中止按钮。面板提供明确的只读/不支持/错误解释；桌面边栏、手机 Sheet 和主题共用一套组件。
 
 其他已接入的前端能力及协议边界见 `docs/FRONTEND_CAPABILITY_AUDIT.md`。握手声明 `experimentalApi:true`，协议生成也包含实验字段，原生 `collaborationMode` 与服务速度通过 `turn/start` 传入，不以提示词模拟计划模式。
+
+首屏线程列表使用 `thread/list useStateDbOnly=true`，不等待扫描/修复历史 JSONL，也不等待每个线程的 rollout 尾部与 `/proc` 检查；活动状态先复用最近观测，再通过 `thread_activity` 推送补全。普通扫描由独立的后台索引协调器在首屏后延迟执行，同类扫描跨请求合并，最近/归档扫描串行，每类自动扫描至少间隔 60 秒。扫描完成仅发送 `thread_index_updated {archived}`，前端重新读取当前筛选的快速列表，不替换对话快照、草稿或滚动位置；已经加载的额外列表分页保留。`POST /api/threads/refresh` 经现有鉴权安排手动后台扫描，不暴露任意 RPC。后台失败不使快速列表失败，也不立即形成重试风暴。
+
+浏览器只在 `localStorage` 保存最近的未归档线程 ID，不缓存对话正文。登录恢复后并行读取该线程与列表；已不存在的保存线程回退到可用最近线程，临时服务器错误不静默切换线程。WebSocket 只在 HTTP 历史就绪后订阅，避免启动时重复加载同一历史；仅接管/加载运行设置的 `thread/resume` 使用 `excludeTurns=true`，不重复传输历史。超长线程的完整历史读取仍可能增加单个线程打开的延迟，与首屏索引瓶颈分开处理。
+
+时间线消息通过稳定的 `turnId` 关联原生轮次，历史快照与实时 Item 通知均保留关联。用户消息和最终回复旁提供分支入口：默认分别选择本轮之前或之后；对话框明确分支以整轮为边界，不能截断某轮内部的工具调用。`POST /api/threads/:threadId/fork` 接受互斥的 `beforeTurnId`（不包含本轮）或 `lastTurnId`（包含本轮），空对象仍复制全部历史。仅使用 Codex 原生 `thread/fork`，不改写 rollout 文件、不截断原线程；未知位置或不支持的协议明确失败，不回退为复制全部历史。通过 `deferGoalContinuation=true` 防止复制目标后自动开始执行。创建前沿用活动检查和每线程操作串行锁；有活动 Turn、压缩或排队指令时等待结束。新分支继承界面模型与下一轮设置，打开后定位末尾；在本轮之前分支时只将本轮首条用户消息文字作为未发送草稿，附件需重新添加。分支共享当前文件系统，既不复制项目文件，也不回退文件修改。
 
 排队指令保存完整附件和下一轮执行设置。队列编辑/删除/排序与 drain、Turn 发送共用每线程串行锁，排序验证全部 ID 严格匹配，已发出的指令不能修改。此队列只属于本 daemon，明确不代表其他 CLI 的原生队列。归档、分支与压缩有活动检查；打开归档记录不恢复它，恢复是独立操作。上下文压缩占用健康接口的 `turnOperations`，防止空闲部署重启打断它。
 

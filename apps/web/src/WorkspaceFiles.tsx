@@ -95,7 +95,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   return value.data as T;
 }
 
-async function copyText(text: string): Promise<void> {
+export async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
     return;

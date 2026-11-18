@@ -153,21 +153,16 @@ loginctl enable-linger "$USER"
 
 ## 8. 升级和维护
 
-升级 Codex CLI 后，协议生成产物需要与本机版本匹配：
+先确认官方稳定版本。对于正在运行的服务，先把新版 CLI 安装到独立的版本目录，不要原地覆盖当前 `CODEX_COMMAND`。用新版实际可执行文件生成协议和执行冒烟测试：
 
 ```bash
-codex --version
-npm run codex:schema
+CODEX_COMMAND=/absolute/path/to/new/codex npm run codex:schema
 npm run build
 npm test
-npm run codex:smoke
+CODEX_COMMAND=/absolute/path/to/new/codex npm run codex:smoke
 ```
 
-确认没有重要活动 Turn 后再重启服务：
-
-```bash
-systemctl --user restart codex-console.service
-```
+上线时按下面的空闲部署流程一起切换 daemon 和 Codex；旧二进制保持可用，以便回滚。在 Linux 上如果 Codex 提示 bubblewrap 或用户命名空间不可用，文本冒烟通过不代表能执行沙箱命令。先验证旧版是否同样受影响，不要为通过测试静默放宽沙箱或修改系统安全策略。
 
 若升级后出现协议未知事件或模型列表错误，保留日志中的方法名和 Codex 版本，阅读 `docs/TECHNICAL_DESIGN.md` 的协议适配章节；不要把完整提示词、文件内容或认证信息粘贴到公开 issue。
 
@@ -176,6 +171,8 @@ systemctl --user restart codex-console.service
 仅前端修复可先运行 `CODEX_CONSOLE_BUILD_DIR=/validated/staged/build npm run deploy:web`，避免中断活动对话。脚本要求源码/构建指纹匹配且 staged daemon 与运行 release 的 daemon 字节完全一致；只添加新静态资产、原子替换 `index.html`，保留旧 hash 资产并备份旧入口，验证实际 HTTP 的 HTML/JS/CSS 和服务 PID 未变化。改变 daemon、服务工作者或现有同名资产时拒绝热发布，必须走下面的空闲完整部署。前端发布结果写到机器本地 deployment 目录的 `web-result.json`；健康接口 `buildRevision` 仍描述运行 daemon，之后可空闲切换完整 release 统一版本。
 
 有活动任务时不能覆盖运行中的构建文件或立即重启。先创建仓库外的独立构建目录，设置 `CODEX_CONSOLE_BUILD_DIR` 后执行 `npm run build`、`npm test` 和 `npm run test:e2e`。验证通过并提交后，以当前用户的独立 `systemd-run --user` 服务执行 `npm run deploy:when-idle`，传入同一个构建目录；可设置 `CODEX_CONSOLE_EXPECTED_VERSION` 验证实际 Codex 版本。
+
+一起升级 CLI 时，向同一个后台任务提供 `CODEX_CONSOLE_DEPLOY_CODEX_COMMAND`（新版可执行文件的绝对路径）和 `CODEX_CONSOLE_EXPECTED_VERSION`（如 `0.170.0`）。脚本准备 release 和实际切换前都会检查文件与版本；只有空闲时才写入服务的 `CODEX_COMMAND`。如新服务未通过健康校验，会恢复原配置及原 Codex 路径。
 
 脚本准备独立 release 后，每 5 秒检查健康接口，连续 6 次确认空闲才更新自启动单元并重启。无法读取健康状态、Codex 未就绪、活动对话未结束时继续等待。新服务健康接口还提供命令、排队消息、审批和 Turn 操作计数，部署会一并等待这些工作结束。首次从旧服务升级时只拥有旧健康接口的对话计数，安排部署期间不要新开命令或新发消息。
 

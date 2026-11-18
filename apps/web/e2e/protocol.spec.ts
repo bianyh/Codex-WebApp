@@ -90,3 +90,25 @@ test("current plan, nested token usage and structured file changes render safely
   await expect(page.locator(".app-shell")).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test("0.169 lifecycle timestamps survive completion and snapshot hydration", async ({ page }) => {
+  let emit = (_event: unknown) => {};
+  const errors = await openConsole(page, (_action, send) => { emit = send; });
+  await resend(page);
+  const startedAtMs = Date.UTC(2026, 10, 18, 1, 2, 3);
+  const event = (method: string, params: unknown) => emit({ type: "thread_event", threadId: thread.id, event: { method, params, receivedAt: "2026-11-18T10:00:00Z" } });
+  event("item/started", { startedAtMs, item: { id: "timed", type: "agentMessage", text: "", phase: "final_answer" } });
+  const expected = await page.evaluate((milliseconds) => {
+    const d = new Date(milliseconds); const pad = (value: number) => String(value).padStart(2, "0");
+    return [d.getFullYear() % 100, d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()].map(pad).join("-");
+  }, startedAtMs);
+  const message = page.locator('[data-item-id="timed"]');
+  await expect(message.locator(".message-meta")).toContainText(expected);
+  event("item/completed", { completedAtMs: startedAtMs + 60000, item: { id: "timed", type: "agentMessage", text: "Timed reply", phase: "final_answer" } });
+  await expect(message.locator(".prose")).toContainText("Timed reply");
+  await expect(message.locator(".message-meta")).toContainText(expected);
+  emit({ type: "thread_snapshot", snapshot: { thread, items: [{ id: "timed", kind: "agent", status: "final_answer", text: "Hydrated reply", createdAt: new Date(startedAtMs).toISOString() }], pendingRequests: [] } });
+  await expect(message.locator(".prose")).toContainText("Hydrated reply");
+  await expect(message.locator(".message-meta")).toContainText(expected);
+  expect(errors).toEqual([]);
+});

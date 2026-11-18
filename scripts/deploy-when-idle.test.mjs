@@ -6,6 +6,19 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 describe("deferred deployment", () => {
+  it("switches the pinned Codex command with the release while preserving unrelated settings", async () => {
+    const { deploymentEnvironment, validateCodexCommand } = await import("./deploy-when-idle.mjs");
+    const original = "CODEX_COMMAND=/old/codex\nCODEX_CWD=/project\nCODEX_CONSOLE_RELEASE_DIR=/old\nCODEX_CONSOLE_BUILD_REVISION=old\n";
+    const updated = deploymentEnvironment(original, { current: "/new/current", revision: "new", codexCommand: "/tools/new codex" });
+    expect(updated).toBe('CODEX_CWD=/project\nCODEX_CONSOLE_RELEASE_DIR=/new/current\nCODEX_CONSOLE_BUILD_REVISION=new\nCODEX_COMMAND="/tools/new codex"\n');
+    expect(deploymentEnvironment(original, { current: "/new", revision: "new" })).toContain("CODEX_COMMAND=/old/codex");
+    expect(original).toContain("CODEX_CONSOLE_BUILD_REVISION=old");
+    for (const unsafe of ["codex", "/tools/codex\nCODEX_CWD=/bad", "/tools/codex\0"]) {
+      expect(() => deploymentEnvironment(original, { current: "/new", revision: "new", codexCommand: unsafe })).toThrow();
+      await expect(validateCodexCommand(unsafe, "0.169.1")).rejects.toThrow();
+    }
+    await expect(validateCodexCommand(process.execPath, "0.169.1")).rejects.toThrow("Unexpected Codex command version");
+  });
   it("validates uncommitted source snapshots and detects artifact or source drift", async () => {
     const { artifactFingerprint, sourceFingerprint, validateBuildManifest } = await import("./build-manifest.mjs");
     const root = await mkdtemp(path.join(tmpdir(), "codex-manifest-test-"));

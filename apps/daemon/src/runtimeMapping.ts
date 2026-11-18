@@ -5,6 +5,30 @@ const str = (value: unknown): string | undefined => typeof value === "string" ? 
 const num = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 const rows = (value: unknown): Record<string, unknown>[] => Array.isArray(value) ? value.map(record) : [];
 
+export function timestampToIso(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const milliseconds = typeof value === "number" && value < 10_000_000_000 ? value * 1000 : value;
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+/** New items carry milliseconds; legacy producers use createdAt/timestamp. */
+export function itemStartedAtFromRaw(raw: unknown): string | undefined {
+  const value = record(raw);
+  if (typeof value.startedAtMs === "number" && Number.isFinite(value.startedAtMs)) {
+    const date = new Date(value.startedAtMs);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return timestampToIso(value.createdAt) ?? timestampToIso(value.timestamp);
+}
+
+export function hiddenAgentMessageNotice(raw: unknown): string | undefined {
+  const item = record(raw);
+  if (item.type !== "agentMessage") return undefined;
+  const mode = record(record(item.moderation).display).mode;
+  return mode === "hide" || mode === "block" ? "Codex 未公开显示这条回复。" : undefined;
+}
+
 export function runtimeSettingsFromRaw(raw: unknown): RuntimeSettings {
   const value = record(raw);
   const mode = record(value.collaborationMode).mode;

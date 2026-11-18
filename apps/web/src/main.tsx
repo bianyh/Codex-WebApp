@@ -8,7 +8,7 @@ import React, {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -72,7 +72,7 @@ import type {
   ExecutionSettings,
   QueueEntry,
 } from "./types";
-import { FilePreview, WorkspaceFiles, fileEntryFromPath, type FsEntry } from "./WorkspaceFiles";
+import { FilePreview, WorkspaceFiles, copyText, fileEntryFromPath, type FsEntry } from "./WorkspaceFiles";
 import { resolveLocalFileHref } from "./fileLinks";
 import { normalizeMarkdownMath } from "./markdown";
 import { createOptimisticUserItem, mergeTimelineItem, textFromRawItem } from "./messageState";
@@ -92,7 +92,9 @@ import { ExecutionSettingsMenu } from "./ExecutionSettingsMenu";
 import { useThreadEntryScroll } from "./useThreadEntryScroll";
 import { StructuredItem } from "./StructuredItem";
 import { ThreadActions } from "./ThreadActions";
-import { runtimeSettingsFromRaw, structuredItem } from "../../daemon/src/runtimeMapping";
+import { BranchDialog } from "./BranchDialog";
+import type { ThreadForkInput } from "../../daemon/src/threadFork";
+import { itemStartedAtFromRaw, runtimeSettingsFromRaw, structuredItem } from "../../daemon/src/runtimeMapping";
 import "./styles.css";
 import "katex/dist/katex.min.css";
 
@@ -113,6 +115,15 @@ const storedThreadModels = (): Record<string, string> => {
 
 const storedBoolean = (key: string): boolean => localStorage.getItem(key) === "true";
 
+function storedSelectedThreadId(): string | null {
+  const value = localStorage.getItem("codex-console-selected-thread");
+  return value && value.length <= 512 ? value : null;
+}
+
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 const api = async <T,>(url: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(url, {
     credentials: "include",
@@ -120,7 +131,7 @@ const api = async <T,>(url: string, init?: RequestInit): Promise<T> => {
     ...init,
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body?.error?.message ?? "请求失败");
+  if (!response.ok) throw new ApiError(body?.error?.message ?? "请求失败", response.status);
   return body?.data as T;
 };
 
@@ -140,12 +151,72 @@ function filesFromClipboard(data: DataTransfer): File[] {
   return files;
 }
 
+function textFromMarkdownNode(node: React.ReactNode): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textFromMarkdownNode).join("");
+  if (React.isValidElement(node)) {
+    const props = node.props as { children?: React.ReactNode };
+    return textFromMarkdownNode(props.children);
+  }
+  return "";
+}
+
+function markdownCodeText(children: React.ReactNode): string {
+  // react-markdown includes one delimiter newline in fenced blocks; it is not
+  // part of the text the user sees and should not be copied.
+  return textFromMarkdownNode(children).replace(/\r\n/g, "\n").replace(/\n$/, "");
+}
+
+function CopyableMarkdownBlock({ children, node: _node, ...props }: React.HTMLAttributes<HTMLPreElement> & ExtraProps) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const resetTimer = useRef<number | undefined>(undefined);
+  const text = useMemo(() => markdownCodeText(children), [children]);
+
+  useEffect(() => () => {
+    if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+  }, []);
+
+  const copy = useCallback(() => {
+    void copyText(text).then(() => {
+      setCopyState("copied");
+      if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+      resetTimer.current = window.setTimeout(() => setCopyState("idle"), 1600);
+    }).catch(() => {
+      setCopyState("failed");
+      if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+      resetTimer.current = window.setTimeout(() => setCopyState("idle"), 2200);
+    });
+  }, [text]);
+
+  const status = copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败" : "复制";
+  return (
+    <div className="prose-code-block">
+      <div className="prose-code-toolbar">
+        <span>代码</span>
+        <button
+          type="button"
+          className={`prose-copy-button ${copyState}`}
+          onClick={copy}
+          aria-label={`${status}代码内容`}
+          title={`${status}代码内容`}
+        >
+          {copyState === "copied" ? <Check size={14} /> : <Copy size={14} />}
+          <span aria-live="polite" aria-atomic="true">{status}</span>
+        </button>
+      </div>
+      <pre {...props}>{children}</pre>
+    </div>
+  );
+}
+
 const MessageMarkdown = memo(function MessageMarkdown({ text, cwd, onOpenFile }: { text: string; cwd?: string; onOpenFile?: (entry: FsEntry) => void }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
       components={{
+        pre: CopyableMarkdownBlock,
         a: ({ href, children, node: _node, ...props }) => {
           const filePath = resolveLocalFileHref(href, cwd);
           if (filePath && onOpenFile) {
@@ -328,6 +399,7 @@ function ThreadDrawer({
   onArchived,
   nextCursor,
   onMore,
+  onRefresh,
 }: {
   threads: Thread[];
   selected: string | null;
@@ -343,6 +415,7 @@ function ThreadDrawer({
   onArchived: (value: boolean) => void;
   nextCursor: string | null;
   onMore: () => void;
+  onRefresh: () => void;
 }) {
   const filtered = threads;
   return (
@@ -374,6 +447,7 @@ function ThreadDrawer({
       <div className="drawer-section-label">
         <span>{archived ? "归档线程" : "最近线程"}</span>
         <span className="count">{filtered.length}</span>
+        <button className="icon-button" onClick={onRefresh} aria-label="刷新线程索引" title="后台刷新线程索引，不影响当前对话"><RefreshCw size={14} /></button>
       </div>
       <div className="thread-list">
         {filtered.map((thread) => (
@@ -412,7 +486,8 @@ function ThreadDrawer({
   );
 }
 
-const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false, editable = false, editUnavailableReason, onEdit, onOpenFile }: { item: Item; cwd?: string; isLastUser?: boolean; editable?: boolean; editUnavailableReason?: string; onEdit?: (item: Item) => void; onOpenFile?: (entry: FsEntry) => void }) {
+const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false, editable = false, editUnavailableReason, onEdit, onOpenFile, onBranch, branchDisabledReason }: { item: Item; cwd?: string; isLastUser?: boolean; editable?: boolean; editUnavailableReason?: string; onEdit?: (item: Item) => void; onOpenFile?: (entry: FsEntry) => void; onBranch?: (item: Item) => void; branchDisabledReason?: string }) {
+  const branchButton = onBranch && !item.queueId && !item.id.startsWith("local-user-") && <button type="button" className="message-branch-button" disabled={Boolean(branchDisabledReason) || !item.turnId} onClick={() => onBranch(item)} title={branchDisabledReason ?? (!item.turnId ? "请刷新对话以读取分支位置" : "从这轮对话创建新分支")} aria-label="从这里创建分支"><GitBranch size={14} /></button>;
   if (["agents", "search", "image", "review", "sleep", "compaction"].includes(item.kind)) return <StructuredItem item={item} cwd={cwd} onOpenFile={onOpenFile} />;
   if (item.kind === "user")
     return (
@@ -427,6 +502,7 @@ const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false,
                 <PencilLine size={14} />
               </button>
             )}
+            {branchButton}
           </div>
           <div className="prose">
             <MessageMarkdown text={item.text ?? ""} cwd={cwd} onOpenFile={onOpenFile} />
@@ -436,7 +512,7 @@ const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false,
     );
   if (item.kind === "agent")
     return (
-      <article className={`message agent-message ${isFinalAgentMessage(item) ? "final-agent-message" : "process-agent-message"}`}>
+      <article className={`message agent-message ${isFinalAgentMessage(item) ? "final-agent-message" : "process-agent-message"}`} data-item-id={item.id}>
         <div className="avatar agent-avatar">
           <Code2 size={16} />
         </div>
@@ -444,6 +520,7 @@ const TimelineItem = memo(function TimelineItem({ item, cwd, isLastUser = false,
           <div className="message-meta">
             Codex{" "}
             <span>{itemTimestamp(item)} · {isFinalAgentMessage(item) ? "最终回复" : item.status === "inProgress" ? "正在生成" : "执行过程"}</span>
+            {isFinalAgentMessage(item) && branchButton}
           </div>
           <div className="prose">
             <MessageMarkdown text={item.text ?? ""} cwd={cwd} onOpenFile={onOpenFile} />
@@ -584,6 +661,8 @@ function TimelineSegments({
   editUnavailableReason,
   onEdit,
   onOpenFile,
+  onBranch,
+  branchDisabledReason,
 }: {
   items: Item[];
   cwd?: string;
@@ -595,6 +674,8 @@ function TimelineSegments({
   editUnavailableReason: string;
   onEdit: (item: Item) => void;
   onOpenFile?: (entry: FsEntry) => void;
+  onBranch: (item: Item) => void;
+  branchDisabledReason?: string;
 }) {
   const segments = useMemo(() => segmentTimeline(items), [items]);
   return (
@@ -613,6 +694,8 @@ function TimelineSegments({
             editUnavailableReason={isRunning ? "请先中止当前运行" : editUnavailableReason}
             onEdit={onEdit}
             onOpenFile={onOpenFile}
+            onBranch={onBranch}
+            branchDisabledReason={branchDisabledReason}
           />
         ));
       })}
@@ -897,16 +980,24 @@ function ContextPanel({
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
+  const paginatedThreadList = useRef(false);
   const [threadQuery, setThreadQuery] = useState("");
   const [archivedThreads, setArchivedThreads] = useState(false);
   const [threadCursor, setThreadCursor] = useState<string | null>(null);
   const threadListGeneration = useRef(0);
-  const [selected, setSelected] = useState<string | null>(null);
+  // Restore the last conversation before the thread index request finishes.
+  // This lets the main timeline hydrate in parallel with the sidebar instead
+  // of leaving the whole page blank while Codex scans its history.
+  const [selected, setSelected] = useState<string | null>(storedSelectedThreadId);
+  const restoredThreadId = useRef(selected);
+  const unavailableThreadIds = useRef(new Set<string>());
   const [selectedArchived, setSelectedArchived] = useState(false);
   const goalControls = useGoal(selected, authenticated, api);
   const goalControlsRef = useRef(goalControls);
   goalControlsRef.current = goalControls;
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [desktopLayout, setDesktopLayout] = useState(() => window.matchMedia("(min-width: 1121px)").matches);
@@ -928,6 +1019,8 @@ function App() {
     try { const value = JSON.parse(localStorage.getItem("codex-console-execution-settings") ?? "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch { return {}; }
   });
   const [threadActionsOpen, setThreadActionsOpen] = useState(false);
+  const [branchTarget, setBranchTarget] = useState<{ threadId: string; item: Item; prompt: string } | null>(null);
+  const branchDraftRef = useRef<{ threadId: string; text: string } | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(initialTheme);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [defaultModel, setDefaultModel] = useState(() => localStorage.getItem("codex-console-default-model") ?? "");
@@ -936,8 +1029,12 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const subscribedThreadRef = useRef<string | null>(null);
+  const readyThreadRef = useRef<string | null>(null);
   const selectedThreadRef = useRef(selected);
   selectedThreadRef.current = selected;
+  const reloadThreadsRef = useRef<() => Promise<void>>(async () => {});
+  const threadListFilterRef = useRef({ archived: archivedThreads });
+  threadListFilterRef.current = { archived: archivedThreads };
   const applyEventRef = useRef<(event: TimelineEvent) => void>(() => {});
   const pendingSendRef = useRef<{ threadId: string; text: string; editing: typeof editingLastMessage } | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -1012,11 +1109,16 @@ function App() {
     localStorage.setItem("codex-console-right-sidebar-collapsed", String(rightSidebarCollapsed));
   }, [rightSidebarCollapsed]);
   useEffect(() => {
+    if (selected && !selectedArchived) localStorage.setItem("codex-console-selected-thread", selected);
+    else localStorage.removeItem("codex-console-selected-thread");
+  }, [selected, selectedArchived]);
+  useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
   useEffect(() => {
+    if (!selected || snapshot?.thread.id !== selected) return;
     setProcessExpanded(turnIsActive && (snapshot?.items.length ?? 0) <= TIMELINE_MAX_ITEMS);
-  }, [selected, turnIsActive, snapshot?.items.length]);
+  }, [selected, snapshot?.thread.id, turnIsActive]);
   useEffect(() => () => {
     for (const attachment of attachmentsRef.current) {
       if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
@@ -1062,17 +1164,23 @@ function App() {
     container.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
   }, [messageNavigation.index]);
 
-  const loadThreads = useCallback(async (cursor?: string) => {
+  const loadThreads = useCallback(async (cursor?: string, background = false) => {
     const generation = ++threadListGeneration.current;
     const params = new URLSearchParams({ page: "true", archived: String(archivedThreads), search: threadQuery });
     if (cursor) params.set("cursor", cursor);
     const response = await api<Thread[] | { threads: Thread[]; nextCursor: string | null }>(`/api/threads?${params}`);
     if (generation !== threadListGeneration.current) return;
-    const value = Array.isArray(response) ? response : response.threads;
-    setThreads((previous) => cursor ? [...previous, ...value.filter((entry) => !previous.some((thread) => thread.id === entry.id))] : value);
-    setThreadCursor(Array.isArray(response) ? null : response.nextCursor);
+    const value = (Array.isArray(response) ? response : response.threads).filter((thread) => !unavailableThreadIds.current.has(thread.id));
+    const preserveTail = background && paginatedThreadList.current;
+    setThreads((previous) => cursor
+      ? [...previous, ...value.filter((entry) => !previous.some((thread) => thread.id === entry.id))]
+      : preserveTail ? [...value, ...previous.filter((thread) => !value.some((entry) => entry.id === thread.id))] : value);
+    if (!preserveTail) setThreadCursor(Array.isArray(response) ? null : response.nextCursor);
+    if (cursor) paginatedThreadList.current = true;
+    else if (!background) paginatedThreadList.current = false;
     if (!selectedThreadRef.current && value[0] && !archivedThreads) setSelected(value[0].id);
   }, [threadQuery, archivedThreads]);
+  reloadThreadsRef.current = () => loadThreads(undefined, true);
   useEffect(() => {
     api<{ authenticated: boolean }>("/api/auth/me")
       .then(() => setAuthenticated(true))
@@ -1080,9 +1188,18 @@ function App() {
   }, []);
   useEffect(() => {
     if (!authenticated) return;
-    const timer = setTimeout(() => { void loadThreads().catch((e) => setError(e.message)); }, 200);
+    const timer = setTimeout(() => { void loadThreads().catch((e) => setError(e.message)); }, threadQuery ? 200 : 0);
     return () => { clearTimeout(timer); threadListGeneration.current += 1; };
   }, [authenticated, loadThreads]);
+  useEffect(() => {
+    // If the saved thread was removed, reset it so the first available recent
+    // thread can be selected once the sidebar request has returned. Keeping
+    // this recovery here also avoids a permanent blank state after a deleted
+    // or expired Codex session.
+    if (selected || archivedThreads) return;
+    const fallback = threads.find((thread) => !unavailableThreadIds.current.has(thread.id));
+    if (fallback) setSelected(fallback.id);
+  }, [archivedThreads, selected, threads]);
   useEffect(() => { localStorage.setItem("codex-console-execution-settings", JSON.stringify(executionSettings)); }, [executionSettings]);
   useEffect(() => { const media = window.matchMedia("(min-width: 1121px)"); const change = () => setDesktopLayout(media.matches); media.addEventListener("change", change); return () => media.removeEventListener("change", change); }, []);
   useEffect(() => {
@@ -1135,7 +1252,7 @@ function App() {
       socket.onopen = () => {
         if (closed) return;
         setConnection("live");
-        if (selectedThreadRef.current) subscribe(selectedThreadRef.current);
+        if (selectedThreadRef.current && readyThreadRef.current === selectedThreadRef.current) subscribe(selectedThreadRef.current);
       };
       socket.onclose = () => {
         if (closed) return;
@@ -1154,6 +1271,7 @@ function App() {
           if (!data?.thread || !Array.isArray(data.items)) { setError("线程数据格式无效，请重新加载"); return; }
           if (event.replacesThreadId === selected) {
             freshThreadRef.current = data.thread.id;
+            readyThreadRef.current = data.thread.id;
             selectedThreadRef.current = data.thread.id;
             subscribedThreadRef.current = data.thread.id;
             if (pendingSendRef.current) pendingSendRef.current = { ...pendingSendRef.current, threadId: data.thread.id, editing: null };
@@ -1167,6 +1285,10 @@ function App() {
           setActiveTurnId(data.thread.activeTurnId ?? null);
           setRequests(data.pendingRequests ?? []);
           setConnection("live");
+        } else if (event.type === "thread_index_updated") {
+          if (event.archived === threadListFilterRef.current.archived) {
+            void reloadThreadsRef.current().catch((reason) => setError(reason.message));
+          }
         } else if (event.type === "goal_state") {
           if (typeof event.threadId === "string" && event.state && typeof event.state === "object") goalControlsRef.current.receiveState(event.state as GoalState, event.threadId);
         } else if (event.type === "thread_activity") {
@@ -1266,7 +1388,7 @@ function App() {
       return;
     }
     if (event.method === "thread/compacted") { setSnapshot((current) => current ? { ...current, compaction: "completed" } : current); return; }
-    const eventCreatedAt = event.receivedAt ?? new Date().toISOString();
+    const eventCreatedAt = itemStartedAtFromRaw(params) ?? event.receivedAt ?? new Date().toISOString();
     const turnObject =
       params.turn && typeof params.turn === "object"
         ? (params.turn as Record<string, unknown>)
@@ -1337,6 +1459,7 @@ function App() {
           items.push({
             id: itemId,
             kind: "agent",
+            turnId: eventTurnId ?? currentTurnId,
             createdAt: eventCreatedAt,
             text: String(params.delta ?? params.text ?? ""),
           });
@@ -1412,7 +1535,8 @@ function App() {
           : "";
         const mapped: Item = {
           id: String(raw.id ?? itemId),
-          createdAt: eventCreatedAt,
+          turnId: eventTurnId ?? currentTurnId,
+          createdAt: itemStartedAtFromRaw(raw) ?? items.find((item) => item.id === String(raw.id ?? itemId))?.createdAt ?? eventCreatedAt,
           kind: rawType === "agentMessage"
             ? "agent"
             : rawType === "reasoning"
@@ -1508,13 +1632,16 @@ function App() {
   };
   applyEventRef.current = applyEvent;
   useEffect(() => {
+    readyThreadRef.current = null;
     if (!selected || !authenticated) return;
     setEditingLastMessage(null);
-    setInput("");
+    setInput(branchDraftRef.current?.threadId === selected ? branchDraftRef.current.text : "");
+    branchDraftRef.current = null;
     clearAttachments();
     setQueuedTurns([]);
     if (freshThreadRef.current === selected) {
       freshThreadRef.current = null;
+      readyThreadRef.current = selected;
       subscribe(selected);
       return;
     }
@@ -1523,13 +1650,26 @@ function App() {
     api<Snapshot>(`/api/threads/${encodeURIComponent(selected)}`)
       .then((value) => {
         if (cancelled || selectedThreadRef.current !== selected) return;
+        readyThreadRef.current = selected;
         setSnapshot(value);
         setRequests(value.pendingRequests ?? []);
         subscribe(selected);
       })
-      .catch((e) => { if (!cancelled) setError(e.message); });
+      .catch((e) => {
+        if (cancelled) return;
+        if (e instanceof ApiError && e.status === 404 && restoredThreadId.current === selected) {
+          unavailableThreadIds.current.add(selected);
+          restoredThreadId.current = null;
+          selectedThreadRef.current = null;
+          setSelected(null);
+        }
+        setError(e.message);
+      });
     return () => { cancelled = true; };
   }, [selected, authenticated, subscribe, clearAttachments]);
+  useEffect(() => {
+    setBranchTarget((current) => current?.threadId === selected ? current : null);
+  }, [selected]);
   useEffect(() => {
     const frame = requestAnimationFrame(updateMessageNavigation);
     return () => cancelAnimationFrame(frame);
@@ -1685,6 +1825,27 @@ function App() {
     setDrawerOpen(false);
     setNewThreadOpen(false);
   };
+  const openFork = (fork: Snapshot, sourceId: string, draft = "") => {
+    setThreads((current) => [fork.thread, ...current.filter((thread) => thread.id !== fork.thread.id)]);
+    setThreadModels((current) => ({ ...current, [fork.thread.id]: current[sourceId] ?? defaultModel }));
+    setExecutionSettings((current) => current[sourceId] ? { ...current, [fork.thread.id]: { ...current[sourceId] } } : current);
+    // A slow fork request must not pull the user back from another conversation.
+    if (selectedThreadRef.current !== sourceId) return;
+    freshThreadRef.current = fork.thread.id;
+    branchDraftRef.current = { threadId: fork.thread.id, text: draft };
+    selectedThreadRef.current = fork.thread.id;
+    pendingSendRef.current = null;
+    setArchivedThreads(false); setSelectedArchived(false);
+    setRequests(fork.pendingRequests ?? []); setActiveTurnId(fork.thread.activeTurnId ?? null);
+    setSnapshot(fork); setSelected(fork.thread.id);
+    setError("");
+  };
+  const beginBranch = useCallback((item: Item) => {
+    const current = snapshotRef.current;
+    if (!current || !item.turnId) return;
+    const prompt = current.items.find((candidate) => candidate.turnId === item.turnId && candidate.kind === "user")?.text ?? "";
+    setBranchTarget({ threadId: current.thread.id, item, prompt });
+  }, []);
   const respond = async (request: RequestItem, decision: string) => {
     let response: Record<string, unknown>;
     try { response = responseForRequest(request, decision); }
@@ -1761,6 +1922,10 @@ function App() {
         onArchived={setArchivedThreads}
         nextCursor={threadCursor}
         onMore={() => { if (threadCursor) void loadThreads(threadCursor).catch((reason) => setError(reason.message)); }}
+        onRefresh={() => {
+          void api("/api/threads/refresh", { method: "POST", body: JSON.stringify({ archived: archivedThreads }) })
+            .then(() => loadThreads()).catch((reason) => setError(reason.message));
+        }}
       />
       <main className="main-column">
         <header className="topbar">
@@ -1879,6 +2044,8 @@ function App() {
                 editUnavailableReason="该线程仍被另一个 Codex 窗口占用，请关闭原窗口或从本控制台打开后再编辑"
                 onEdit={beginEditLastMessage}
                 onOpenFile={setPreviewEntry}
+                onBranch={beginBranch}
+                branchDisabledReason={turnIsActive || snapshot.compaction === "running" || queuedTurns.length ? "请先结束当前任务并处理排队指令，再创建分支" : selectedArchived ? "请先恢复归档线程" : undefined}
               />
             </>
           )}
@@ -2086,9 +2253,13 @@ function App() {
       </aside>
       {threadActionsOpen && snapshot && <ThreadActions thread={snapshot.thread} archived={selectedArchived} onClose={() => setThreadActionsOpen(false)} onAction={async (action, name) => {
         const id = snapshot.thread.id;
-        if (action === "fork") { const fork = await api<Snapshot>(`/api/threads/${encodeURIComponent(id)}/fork`, { method: "POST", body: "{}" }); setArchivedThreads(false); setSelectedArchived(false); setSelected(fork.thread.id); setSnapshot(fork); }
+        if (action === "fork") { const fork = await api<Snapshot>(`/api/threads/${encodeURIComponent(id)}/fork`, { method: "POST", body: "{}" }); openFork(fork, id); }
         else { await api(`/api/threads/${encodeURIComponent(id)}/${action}`, { method: action === "name" ? "PATCH" : "POST", body: JSON.stringify(action === "name" ? { name } : {}) }); if (action === "archive") { setSelected(null); setSnapshot(null); setThreads((threads) => threads.filter((thread) => thread.id !== id)); } if (action === "unarchive") { setArchivedThreads(false); setSelectedArchived(false); } if (action === "name") setSnapshot((current) => current?.thread.id === id ? { ...current, thread: { ...current.thread, title: name! } } : current); }
         await loadThreads();
+      }} />}
+      {branchTarget && <BranchDialog key={`${branchTarget.threadId}:${branchTarget.item.id}`} item={branchTarget.item} onClose={() => setBranchTarget(null)} onCreate={async (boundary: ThreadForkInput) => {
+        const fork = await api<Snapshot>(`/api/threads/${encodeURIComponent(branchTarget.threadId)}/fork`, { method: "POST", body: JSON.stringify(boundary) });
+        openFork(fork, branchTarget.threadId, boundary.beforeTurnId ? branchTarget.prompt : "");
       }} />}
       {newThreadOpen && (
         <NewThreadDialog

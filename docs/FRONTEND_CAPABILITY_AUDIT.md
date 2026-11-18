@@ -1,6 +1,6 @@
 # Frontend capability audit
 
-Implemented against the locally generated Codex **0.162.1** protocol, including experimental fields negotiated by the local stdio client. Generated files stay untracked. Actual isolated Codex tests, not documentation assumptions, verify protocol behavior. Availability still depends on the installed version, provider and account.
+Validated against the locally generated Codex **0.170.0** protocol, including experimental fields negotiated by the local stdio client. Generated files stay untracked. Actual isolated Codex tests, not documentation assumptions, verify protocol behavior. Availability still depends on the installed version, provider and account.
 
 ## Implemented surfaces
 
@@ -13,6 +13,7 @@ Implemented against the locally generated Codex **0.162.1** protocol, including 
 | Context | Last-turn context pressure separate from cumulative tokens, cache/reasoning counts, context capacity; confirmed compaction | `thread/tokenUsage/updated`, `thread/compact/start`, compaction items/completion; idle/ownership/queue guards and deployment activity tracking |
 | Thread management | Ellipsis menu: rename, fork, archive or restore; archived/recent drawer, server-side title search and more pages | `thread/name/set`, `thread/fork`, archive/unarchive; `thread/list` cursor/search/archived filters; opening an archive does not resume it |
 | Structured tools | Sub-agent threads/state/messages, safe search links, authenticated local or inline raster images, reviews, sleep/compaction | Explicit normalized timeline types instead of unknown raw objects; command exit codes and command/tool duration |
+| Message compatibility | Stable per-message timestamps across live updates and reload; a placeholder for withheld replies | Native millisecond start timestamps with legacy fallbacks; explicit `hide` and `block` display modes are honored |
 | Quotas | Reported used percentage/windows/reset time and ordinary-usage denial | `account/rateLimits/read`, sanitized quota buckets; no account identity, credits secrets or inferred unlimited access |
 | Inventories | MCP state/tool count, Skills enabled state, installed plugin state, Hook trust/handler type; manual and visible minute refresh | Read-only `mcpServerStatus/list` (pagination), `skills/list`, `plugin/installed`, `hooks/list`; whitelisted fields, summarized errors, no raw commands/credentials |
 | Browser safety | Shared mobile/desktop panels, both themes, bounded/collapsible timeline, strict frontend typecheck | `npm run typecheck`, unit/browser/native integration coverage, error paths keep app visible |
@@ -23,7 +24,7 @@ Implemented against the locally generated Codex **0.162.1** protocol, including 
 - The queue shown is the **console daemon's in-memory queue**, not native submissions in an external CLI. It does not survive service restarts; idle deployments wait for it to drain. Editing affects text only, preserving attachments/settings. Already dispatched entries cannot be edited/cancelled through the queue; use Turn interrupt.
 - Next-turn choices do not reconfigure an active Turn or external CLI. Steering messages guide the current Turn using its existing settings. Custom provider choices are ultimately validated by Codex/provider. Service tiers do not imply universal account access or a price guarantee.
 - Context pressure is a best-effort last-turn total divided by reported model capacity, not an exact live context measure. Missing telemetry stays unavailable. Goal budget and account quotas are independent. Compaction may need model access and can fail; errors remain visible. No file rollback is performed.
-- Fork UI copies the current completed history into a new conversation. API also accepts `lastTurnId`, but arbitrary historical-turn selection is not exposed in this UI. Archive/restore does not delete user files.
+- Fork UI can copy the completed history or branch before or after a selected turn. Archive/restore does not delete user files.
 - Account quotas are read-only; detailed financial usage reports/credit purchasing/reset credits are not added. Third-party API providers can legitimately return no OpenAI account quota data. Ordinary-usage denial is not inferred away from percentages/reset dates.
 - Inventory panels do not install plugins/skills, change Hook trust, initiate OAuth, modify permissions, or expose config files. Future management workflows require separate authorization and design. Read failures are shown as unavailable, not empty-but-successful.
 - Search covers extracted thread titles through native `searchTerm`, not full message-body search. Multi-agent cards provide navigation/status, not autonomous delegation or new agent creation controls.

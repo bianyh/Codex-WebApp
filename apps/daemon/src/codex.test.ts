@@ -52,6 +52,31 @@ describe("Codex protocol mapping", () => {
     });
   });
 
+  it("uses 0.169 item lifecycle timestamps instead of the turn or receipt time", () => {
+    const startedAtMs = 1_704_164_645_321;
+    const snapshot = snapshotFromRaw({ id: "t", turns: [{ id: "turn", status: "completed", startedAt: 1_704_164_600, items: [
+      { type: "userMessage", id: "u", startedAtMs, content: [{ type: "text", text: "Hello" }] },
+      { type: "agentMessage", id: "a", startedAtMs: startedAtMs + 1000, completedAtMs: startedAtMs + 9000, text: "Done", phase: "final_answer" },
+    ] }] });
+    expect(snapshot.items.map((item) => item.createdAt)).toEqual(["2024-01-02T03:04:05.321Z", "2024-01-02T03:04:06.321Z"]);
+  });
+
+  it.each(["hide", "block"])("honors the 0.170 %s display mode in history and live events", (mode) => {
+    const item = { type: "agentMessage", id: "a", text: "Withheld response", phase: "final_answer", startedAtMs: 1_704_164_645_321, moderation: { moderated: true, display: { mode, version: 1 } } };
+    const notice = "Codex 未公开显示这条回复。";
+    expect(itemFromRaw(item)).toMatchObject({ text: notice, createdAt: "2024-01-02T03:04:05.321Z" });
+    expect(itemFromRaw({ ...item, moderation: { moderated: false, display: { mode: "show", version: 1 } } }).text).toBe(item.text);
+    const adapter = new CodexProcess();
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    adapter["handleLine"](JSON.stringify({ method: "item/completed", params: { threadId: "t", turnId: "turn", item } }));
+    adapter["handleLine"](JSON.stringify({ method: "turn/completed", params: { threadId: "t", turn: { id: "turn", items: [item] } } }));
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener.mock.calls[0]?.[0].event.item).toEqual({ type: "agentMessage", id: "a", phase: "final_answer", startedAtMs: item.startedAtMs, completedAtMs: undefined, text: notice });
+    expect(listener.mock.calls[1]?.[0].event.turn.items[0].text).toBe(notice);
+    expect(JSON.stringify(listener.mock.calls)).not.toContain(item.text);
+  });
+
   it("keeps approval and user-input waits as active statuses", () => {
     expect(summaryFromRaw({ id: "approval", status: { type: "active", activeFlags: ["waitingOnApproval"] } }).status).toBe("waiting_approval");
     expect(summaryFromRaw({ id: "input", status: { type: "active", activeFlags: ["waitingOnUserInput"] } }).status).toBe("waiting_input");

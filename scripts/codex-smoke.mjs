@@ -165,6 +165,24 @@ try {
   assert.equal(multiTurnReplacement.items.filter((item) => item.kind === "user").length, 1);
   await replay(multiTurnReplacement.thread.id);
   console.log("Adapter multi-turn legacy branching and resend: passed");
+  for (const sourceId of [thread.id, forked.thread.id]) {
+    const original = await adapter.readThread(sourceId);
+    const turnIds = [...new Set(original.items.filter((item) => item.kind === "user").map((item) => item.turnId))];
+    assert.equal(turnIds.length, 2);
+    assert.ok(turnIds.every((id) => typeof id === "string"));
+    for (const boundary of [{ lastTurnId: turnIds[0] }, { beforeTurnId: turnIds[1] }]) {
+      const branch = await adapter.forkThread(sourceId, boundary);
+      assert.notEqual(branch.thread.id, sourceId);
+      assert.equal(branch.items.filter((item) => item.kind === "user").length, 1);
+      assert.deepEqual(branch.items.map((item) => ({ kind: item.kind, text: item.text })), original.items.filter((item) => item.turnId === turnIds[0]).map((item) => ({ kind: item.kind, text: item.text })));
+      await replay(branch.thread.id);
+      assert.equal((await adapter.readThread(sourceId)).items.filter((item) => item.kind === "user").length, 2);
+    }
+    const emptyBranch = await adapter.forkThread(sourceId, { beforeTurnId: turnIds[0] });
+    assert.equal(emptyBranch.items.length, 0);
+    await replay(emptyBranch.thread.id);
+  }
+  console.log("Exact before/after-turn and first-turn branches: paginated and legacy passed; originals preserved");
   await adapter.stop();
   const dataDir = path.join(root, "console-state");
   await mkdir(dataDir);
@@ -203,11 +221,24 @@ try {
   controlSocket.send(JSON.stringify({ type: "subscribe_thread", threadId: controlId }));
   const until = async (predicate, label) => { for (let attempt = 0; attempt < 400; attempt += 1) { const result = predicate(); if (result) return result; await new Promise((resolve) => setTimeout(resolve, 50)); } throw new Error(`Timeout: ${label}`); };
   await until(() => controlEvents.some((event) => event.type === "thread_snapshot"), "subscription");
+  const listStarted = performance.now();
+  const fastList = await http("/api/threads?page=true");
+  const fastListMs = Math.round(performance.now() - listStarted);
+  // A newly created empty thread is not necessarily materialized in the DB
+  // until its first turn. Use the already persisted smoke conversation here.
+  assert.ok(fastList.threads.some((entry) => entry.id === thread.id));
+  assert.ok(fastListMs < 2000, "Interactive thread list should not wait for the deferred rollout scan");
+  assert.equal((await fetch(`${base}/api/threads/refresh`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
+  await http("/api/threads/refresh", "POST", {});
+  await until(() => controlEvents.some((event) => event.type === "thread_index_updated" && event.archived === false), "background thread index reconciliation");
+  assert.equal((await fetch(`${base}/api/threads/${randomUUID()}`, { headers: { cookie } })).status, 404);
+  console.log(`Fast indexed thread list: ${fastListMs} ms; authenticated background reconciliation: passed`);
   const controlSend = (action) => controlSocket.send(JSON.stringify({ threadId: controlId, ...action }));
   nextProviderDelay = 3000;
   controlSend({ type: "start_turn", text: "Queue blocker", model: "smoke-model", effort: "high", serviceTier: "default", mode: "plan" });
   await until(() => controlEvents.some((event) => event.event?.method === "turn/started"), "plan turn start");
   assert.equal((await fetch(`${base}/api/threads/${controlId}/compact`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: "{}" })).status, 409);
+  assert.equal((await fetch(`${base}/api/threads/${controlId}/fork`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: "{}" })).status, 409);
   const attachmentPath = path.join(dataDir, "uploads", "queue-note.txt");
   await mkdir(path.dirname(attachmentPath), { recursive: true });
   await writeFile(attachmentPath, "Attachment retained");
@@ -239,6 +270,17 @@ try {
   assert.ok(page.threads.some((entry) => entry.id === controlId));
   const fork = await http(`/api/threads/${controlId}/fork`, "POST", {});
   assert.notEqual(fork.thread.id, controlId);
+  const sourceHistory = await http(`/api/threads/${controlId}`);
+  const sourceUserItems = sourceHistory.items.filter((item) => item.kind === "user");
+  for (const boundary of [{ lastTurnId: sourceUserItems[0].turnId }, { beforeTurnId: sourceUserItems[1].turnId }]) {
+    const branch = await http(`/api/threads/${controlId}/fork`, "POST", boundary);
+    assert.equal(branch.items.filter((item) => item.kind === "user").length, 1);
+  }
+  for (const body of [{ lastTurnId: "a", beforeTurnId: "b" }, { beforeTurnId: "" }, { itemId: "unsupported" }]) {
+    assert.equal((await fetch(`${base}/api/threads/${controlId}/fork`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body) })).status, 400);
+  }
+  assert.equal((await fetch(`${base}/api/threads/${controlId}/fork`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ lastTurnId: randomUUID() }) })).status, 409);
+  assert.equal((await fetch(`${base}/api/threads/${controlId}/fork`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
   await http(`/api/threads/${fork.thread.id}/archive`, "POST", {});
   const archived = await http("/api/threads?page=true&archived=true");
   assert.ok(archived.threads.some((entry) => entry.id === fork.thread.id));

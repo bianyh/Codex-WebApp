@@ -128,6 +128,22 @@ test("structured agent, search, image and tool timing cards render safely", asyn
   await page.locator(".command-card summary").click(); await expect(page.locator(".tool-metadata")).toContainText("退出码 1"); expect(errors).toEqual([]);
 });
 
+test("expanding execution details stays open as a long running thread receives new actions", async ({ page }) => {
+  const { emit, errors } = await open(page);
+  const items = Array.from({ length: 361 }, (_, index) => ({ id: `reason-${index}`, kind: "reasoning", title: "Reasoning", text: `Step ${index}` }));
+  emit({ type: "thread_snapshot", snapshot: { thread, items, pendingRequests: [] } });
+  emit({ type: "thread_activity", activity: { threadId: thread.id, status: "running", activeTurnId: "turn-long", canInterrupt: true, activitySource: "console" } });
+
+  const toggle = page.getByRole("button", { name: /展开执行过程/ });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  await expect(page.getByRole("button", { name: /收起执行过程/ })).toHaveAttribute("aria-expanded", "true");
+
+  emit({ type: "thread_event", threadId: thread.id, event: { method: "item/completed", params: { item: { id: "new-action", type: "commandExecution", command: "printf done", status: "completed" } } } });
+  await expect(page.getByRole("button", { name: /收起执行过程/ })).toHaveAttribute("aria-expanded", "true");
+  expect(errors).toEqual([]);
+});
+
 test("tablet dark theme context drawer keeps queue controls accessible", async ({ page }) => {
   await page.setViewportSize({ width: 768, height: 1024 });
   const { panel, tab, errors } = await open(page);

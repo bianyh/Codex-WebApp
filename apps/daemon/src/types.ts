@@ -59,6 +59,7 @@ export type ThreadSummary = {
 
 export type TimelineItem = {
   id: string;
+  turnId?: string;
   queueId?: string;
   kind: "user" | "agent" | "reasoning" | "command" | "file_change" | "plan" | "mcp" | "system" | "unknown" | "agents" | "search" | "image" | "review" | "sleep" | "compaction";
   createdAt?: string;

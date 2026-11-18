@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { inventoryFromRaw, mapTokenUsage, quotasFromRaw, runtimeSettingsFromRaw, structuredItem } from "./runtimeMapping.js";
+import { inventoryFromRaw, itemStartedAtFromRaw, mapTokenUsage, quotasFromRaw, runtimeSettingsFromRaw, structuredItem } from "./runtimeMapping.js";
 import { executionParams, executionSettingsSchema } from "./executionSettings.js";
 import { CodexProcess, itemFromRaw } from "./codex.js";
 import { vi } from "vitest";
 
 describe("runtime presentation", () => {
+  it("reads millisecond lifecycle timestamps and falls back for older or invalid values", () => {
+    expect(itemStartedAtFromRaw({ startedAtMs: 1000 })).toBe("1970-01-01T00:00:01.000Z");
+    expect(itemStartedAtFromRaw({ startedAtMs: null, createdAt: 1_704_164_645 })).toBe("2024-01-02T03:04:05.000Z");
+    expect(itemStartedAtFromRaw({ startedAtMs: NaN, createdAt: "invalid", timestamp: "2024-01-02T03:04:05Z" })).toBe("2024-01-02T03:04:05.000Z");
+    expect(itemStartedAtFromRaw({ startedAtMs: Infinity, completedAtMs: 1_704_164_645_321 })).toBeUndefined();
+  });
   it("keeps cumulative and last-turn context accounting distinct", () => {
     expect(mapTokenUsage({ total: { inputTokens: 1000, outputTokens: 100, totalTokens: 1100, cachedInputTokens: 600, reasoningOutputTokens: 30 }, last: { inputTokens: 40, outputTokens: 10, totalTokens: 50 }, modelContextWindow: 200 })).toMatchObject({ total: 1100, cachedInput: 600, reasoningOutput: 30, last: { total: 50 }, modelContextWindow: 200 });
     expect(mapTokenUsage({ modelContextWindow: -1, last: null })).not.toHaveProperty("modelContextWindow");
@@ -56,8 +62,8 @@ describe("next-turn settings protocol", () => {
     const adapter = new CodexProcess();
     const rpc = vi.spyOn(adapter, "request").mockImplementation(async (method) => method === "thread/list" ? { data: [{ id: "t", name: "Found" }], nextCursor: "next" } : { thread: { id: "fork", turns: [] }, model: "test" });
     expect(await adapter.listThreadPage({ archived: true, searchTerm: "Found", cursor: "page" })).toMatchObject({ threads: [{ id: "t" }], nextCursor: "next" });
-    expect(rpc).toHaveBeenCalledWith("thread/list", expect.objectContaining({ archived: true, searchTerm: "Found", cursor: "page" }));
-    expect((await adapter.forkThread("t", "before")).thread.id).toBe("fork");
-    expect(rpc).toHaveBeenCalledWith("thread/fork", { threadId: "t", lastTurnId: "before", excludeTurns: true });
+    expect(rpc).toHaveBeenCalledWith("thread/list", expect.objectContaining({ archived: true, searchTerm: "Found", cursor: "page", useStateDbOnly: true }));
+    expect((await adapter.forkThread("t", { lastTurnId: "before" })).thread.id).toBe("fork");
+    expect(rpc).toHaveBeenCalledWith("thread/fork", { threadId: "t", lastTurnId: "before", excludeTurns: true, deferGoalContinuation: true });
   });
 });
