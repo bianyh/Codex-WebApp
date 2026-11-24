@@ -204,7 +204,7 @@ interface CodexAdapter {
 
 - `thread/rollback` 已移除。分页线程先通过 `thread/turns/list` 找到最后一轮，再发送 `thread/revert {threadId,beforeTurnId}`；此操作只调整会话历史，不撤销文件修改。
 - `historyMode=legacy` 不能使用 `thread/revert`。旧版服务器保留原有 rollback；新版服务器改为 `thread/fork {threadId,lastTurnId}` 保留截至上一轮的历史，第一轮重发创建同目录和模型/审批/沙箱设置的新线程。原线程不被截断，前端通过 `replacesThreadId` 切换订阅。
-- 分页历史使用 `thread/read includeTurns=false` 获取元数据，通过 `thread/turns/list itemsView=full` 顺序读取所有页。未持久化的新线程可能尚无分页历史，按空历史处理。
+- 分页历史先读取元数据，再用每页 20 轮、总预算 3 秒的 `thread/turns/list itemsView=full` 读取完整明细。若完整读取超时，改用原生 `itemsView=summary` 分页加载全部用户消息和最终回复，并标记部分历史执行明细暂不可用；不修改 Codex 历史。该线程在接下来 60 秒内直接读取摘要，同一线程的并发读取合并。摘要展示不等待接管；回退边界单独查询最新一轮摘要，不依赖完整执行历史。未持久化的新线程按空历史处理。
 - 新版按消息提供毫秒级 `startedAtMs`；历史优先读取该字段，实时展示使用开始事件时间，完成通知不会把它替换为完成时间。旧历史仍回退到既有时间字段。
 - `0.170.0` 的回复展示标记为 `hide` 或 `block` 时，daemon 将对应历史项和包含该项的实时通知替换为占位提示，不转发该项的原文或私有展示元数据。
 - Plan 的步骤为 `{step,status}`；Token 用量为 `{total:{inputTokens,outputTokens,totalTokens},last:...}`；文件修改类型为 `{type,move_path?}`。daemon 与前端均规范化为稳定领域字段，不把对象直接渲染为数字或状态文字。

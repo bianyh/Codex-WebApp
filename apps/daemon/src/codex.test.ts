@@ -118,20 +118,40 @@ describe("history and resend compatibility", () => {
     expect(rpc).toHaveBeenCalledWith("thread/rollback", { threadId: "t", numTurns: 1 });
     expect(rpc.mock.calls.some(([method]) => method === "thread/fork")).toBe(false);
   });
-  it("hydrates paginated turns before selecting the revert target", async () => {
+  it("selects the most recent native summary turn without reading full history before revert", async () => {
     const process = new CodexProcess();
     const rpc = vi.spyOn(process, "request").mockImplementation(async (method, params) => {
       const input = params as Record<string, unknown>;
       if (method === "thread/read") return { thread: { id: "t", historyMode: "paginated" } };
-      if (method === "thread/turns/list") return input.cursor === "next"
-        ? { data: [{ id: "last", status: "completed", items: [] }], nextCursor: null }
-        : { data: [{ id: "first", status: "completed", items: [] }], nextCursor: "next" };
+      if (method === "thread/turns/list") return input.sortDirection === "desc"
+        ? { data: [{ id: "last", status: "completed", items: [] }], nextCursor: "older" }
+        : { data: [{ id: "first", status: "completed", items: [] }], nextCursor: null };
       return {};
     });
     const result = await process.rollbackLastTurn("t");
     expect(result.thread.id).toBe("t");
+    expect(rpc).toHaveBeenCalledWith("thread/turns/list", { threadId: "t", limit: 1, sortDirection: "desc", itemsView: "summary" });
     expect(rpc).toHaveBeenCalledWith("thread/revert", { threadId: "t", beforeTurnId: "last" });
     expect(rpc.mock.calls.some(([method]) => method === "thread/rollback")).toBe(false);
+  });
+  it("falls back to every summary page after a stalled full page and coalesces concurrent reads", async () => {
+    const process = new CodexProcess();
+    const rpc = vi.spyOn(process, "request").mockImplementation(async (method, params) => {
+      const { itemsView, cursor } = params as { itemsView?: string; cursor?: string };
+      if (method === "thread/read") return { thread: { id: "large-branch", historyMode: "paginated" } };
+      if (itemsView === "full" && !cursor) return { data: [{ id: "obsolete", items: [] }], nextCursor: "stalled" };
+      if (itemsView === "full") throw new Error("RPC timeout: thread/turns/list");
+      return cursor
+        ? { data: [{ id: "latest", status: "completed", items: [{ id: "reply", type: "agentMessage", text: "Latest reply" }] }] }
+        : { data: [{ id: "earlier", status: "completed", items: [{ id: "prompt", type: "userMessage", content: [{ type: "text", text: "Prompt" }] }] }], nextCursor: "more" };
+    });
+    const [first, second] = await Promise.all([process.readThread("large-branch"), process.readThread("large-branch")]);
+    expect(first).not.toBe(second);
+    expect(first).toMatchObject({ historyDetail: "summary", items: [{ turnId: "earlier", text: "Prompt" }, { turnId: "latest", text: "Latest reply", status: "final_answer" }] });
+    expect(second).toEqual(first);
+    expect(rpc.mock.calls.filter(([, params]) => (params as { itemsView?: string }).itemsView === "full")).toHaveLength(2);
+    await process.readThread("large-branch");
+    expect(rpc.mock.calls.filter(([, params]) => (params as { itemsView?: string }).itemsView === "full")).toHaveLength(2);
   });
   it("preserves legacy history by forking through the previous turn when rollback was removed", async () => {
     const process = new CodexProcess();

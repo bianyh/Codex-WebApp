@@ -2023,6 +2023,12 @@ function App() {
           )}
           {snapshot && (
             <>
+              {snapshot.historyDetail === "summary" && (
+                <div className="timeline-error-card" role="status">
+                  <CircleAlert size={16} />
+                  <div className="prose">Codex 暂未返回完整历史。已显示用户消息和最终回复；部分历史执行明细暂不可用。</div>
+                </div>
+              )}
               {timelineStart > 0 && (
                 <button
                   className="load-earlier-button"

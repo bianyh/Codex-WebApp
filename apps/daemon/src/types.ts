@@ -102,6 +102,7 @@ export type PendingRequest = {
 
 export type ThreadSnapshot = {
   thread: ThreadSummary;
+  historyDetail?: "summary";
   items: TimelineItem[];
   pendingRequests: PendingRequest[];
   goalState?: GoalState;

@@ -15,6 +15,10 @@ type RpcMessage = RpcResponse | RpcNotification;
 
 type Listener = (event: ConsoleEvent) => void;
 type RequestWaiter = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
+type HistoryView = "full" | "summary";
+type HistoryPage = { data?: Record<string, unknown>[]; nextCursor?: string | null };
+const fullHistoryBudgetMs = 3_000;
+const historyFallbackCooldownMs = 60_000;
 type CodexUserInput =
   | { type: "text"; text: string; text_elements: [] }
   | { type: "localImage"; path: string }
@@ -194,6 +198,8 @@ export class CodexProcess {
   private activeTurns = new Map<string, string>();
   private pendingRequests = new Map<string | number, { threadId?: string; request: PendingRequest }>();
   private settings = new Map<string, RuntimeSettings>();
+  private readonly historyReads = new Map<string, Promise<{ raw: Record<string, unknown>; summaryOnly?: true }>>();
+  private readonly summaryUntil = new Map<string, number>();
   private _version = "unknown";
   private _capabilities: AdapterCapabilities = { codexVersion: "unknown", methods: [], supportsSteer: true, supportsApprovals: true, supportsDiff: true, supportsPlan: true };
 
@@ -386,7 +392,14 @@ export class CodexProcess {
   }
 
   async readThread(threadId: string): Promise<ThreadSnapshot> {
-    const snapshot = snapshotFromRaw(await this.readRawThread(threadId));
+    let reading = this.historyReads.get(threadId);
+    if (!reading) {
+      reading = this.readRawThread(threadId).finally(() => this.historyReads.delete(threadId));
+      this.historyReads.set(threadId, reading);
+    }
+    const { raw, summaryOnly } = await reading;
+    const snapshot = snapshotFromRaw(raw);
+    if (summaryOnly) snapshot.historyDetail = "summary";
     snapshot.thread.runtimeSettings = { ...snapshot.thread.runtimeSettings, ...this.settings.get(threadId) };
     snapshot.pendingRequests = this.getPendingRequests(threadId);
     return snapshot;
@@ -411,23 +424,48 @@ export class CodexProcess {
     await this.request("thread/goal/clear", { threadId, origin: "user" });
   }
 
-  private async readRawThread(threadId: string): Promise<Record<string, unknown>> {
+  private async readThreadMetadata(threadId: string): Promise<Record<string, unknown>> {
     const result = await this.request("thread/read", { threadId, includeTurns: false }) as { thread: Record<string, unknown> };
     const raw = result.thread;
     if (!raw || typeof raw.id !== "string") throw new Error("Codex 返回了无效的线程数据");
+    return raw;
+  }
+
+  private async readRawThread(threadId: string): Promise<{ raw: Record<string, unknown>; summaryOnly?: true }> {
+    const raw = await this.readThreadMetadata(threadId);
     if (raw.historyMode !== "paginated") {
       const history = await this.request("thread/read", { threadId, includeTurns: true }) as { thread: Record<string, unknown> };
-      return history.thread;
+      return { raw: history.thread };
     }
+    if ((this.summaryUntil.get(threadId) ?? 0) <= Date.now()) {
+      this.summaryUntil.delete(threadId);
+      try {
+        return { raw: { ...raw, turns: await this.readHistoryPages(threadId, "full") } };
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "RPC timeout: thread/turns/list") throw error;
+        if (this.summaryUntil.size >= 128) {
+          const oldest = this.summaryUntil.keys().next().value;
+          if (oldest !== undefined) this.summaryUntil.delete(oldest);
+        }
+        this.summaryUntil.set(threadId, Date.now() + historyFallbackCooldownMs);
+      }
+    }
+    return { raw: { ...raw, turns: await this.readHistoryPages(threadId, "summary") }, summaryOnly: true };
+  }
+
+  private async readHistoryPages(threadId: string, itemsView: HistoryView): Promise<unknown[]> {
     const turns: unknown[] = [];
     let cursor: string | null = null;
     const seen = new Set<string>();
+    const deadline = performance.now() + fullHistoryBudgetMs;
     do {
-      let page: { data?: unknown[]; nextCursor?: string };
+      const timeout = itemsView === "full" ? Math.ceil(deadline - performance.now()) : undefined;
+      if (timeout !== undefined && timeout <= 0) throw new Error("RPC timeout: thread/turns/list");
+      let page: HistoryPage;
       try {
-        page = await this.request("thread/turns/list", { threadId, cursor, limit: 100, sortDirection: "asc", itemsView: "full" }) as typeof page;
+        page = await this.request("thread/turns/list", { threadId, cursor, limit: itemsView === "full" ? 20 : 100, sortDirection: "asc", itemsView }, timeout) as HistoryPage;
       } catch (error) {
-        if (cursor === null && turns.length === 0 && error instanceof Error && /not materialized yet/i.test(error.message)) return { ...raw, turns: [] };
+        if (cursor === null && turns.length === 0 && error instanceof Error && /not materialized yet/i.test(error.message)) return [];
         throw error;
       }
       if (Array.isArray(page.data)) turns.push(...page.data);
@@ -435,7 +473,7 @@ export class CodexProcess {
       if (cursor && seen.has(cursor)) throw new Error("Codex 返回了重复的历史分页游标");
       if (cursor) seen.add(cursor);
     } while (cursor);
-    return { ...raw, turns };
+    return turns;
   }
 
   async startThread(input: { cwd?: string; model?: string; sandbox?: string; approvalPolicy?: string }): Promise<ThreadSnapshot> {
@@ -477,12 +515,16 @@ export class CodexProcess {
   async interruptTurn(threadId: string, turnId: string): Promise<unknown> { return this.request("turn/interrupt", { threadId, turnId }); }
   async rollbackLastTurn(threadId: string): Promise<ThreadSnapshot> {
     await this.ensureLoaded(threadId);
-    const raw = await this.readRawThread(threadId);
-    const turns = Array.isArray(raw.turns) ? raw.turns as Record<string, unknown>[] : [];
+    const metadata = await this.readThreadMetadata(threadId);
+    const paginated = metadata.historyMode === "paginated";
+    const raw = paginated ? metadata : (await this.request("thread/read", { threadId, includeTurns: true }) as { thread: Record<string, unknown> }).thread;
+    const turns = paginated
+      ? (await this.request("thread/turns/list", { threadId, limit: 1, sortDirection: "desc", itemsView: "summary" }) as HistoryPage).data ?? []
+      : Array.isArray(raw.turns) ? raw.turns as Record<string, unknown>[] : [];
     const last = turns.at(-1);
     if (!last || typeof last.id !== "string") throw new Error("该线程没有可以回退的消息");
     if (last.status === "inProgress") throw new Error("请先中止当前运行，再重新发送最近消息");
-    if (raw.historyMode === "paginated") {
+    if (paginated) {
       await this.request("thread/revert", { threadId, beforeTurnId: last.id });
       return this.readThread(threadId);
     }

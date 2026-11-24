@@ -6,13 +6,13 @@ const thread = { id: "test-thread", title: "Protocol regression", cwd: "/tmp", s
 const snapshot = { thread, items: [{ id: "user", kind: "user", text: "Original prompt" }, { id: "agent", kind: "agent", text: "Original answer", status: "final_answer" }], pendingRequests: [] };
 const origin = "http://10.0.0.123:8787";
 
-async function openConsole(page: Page, onSend: (action: Record<string, unknown>, emit: (value: unknown) => void) => void) {
+async function openConsole(page: Page, onSend: (action: Record<string, unknown>, emit: (value: unknown) => void) => void, initialSnapshot: typeof snapshot & { historyDetail?: "summary" } = snapshot) {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route(`${origin}/**`, async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname.startsWith("/api/")) {
-      const data = pathname === "/api/auth/me" ? { authenticated: true } : pathname === "/api/threads" ? [thread] : pathname.endsWith("/goal") ? { goal: null, supported: true, canControl: true } : pathname.startsWith("/api/threads/") ? snapshot : pathname === "/api/models" ? [] : pathname === "/api/fs/list" ? { path: "/tmp", root: "/tmp", parent: null, entries: [] } : [];
+      const data = pathname === "/api/auth/me" ? { authenticated: true } : pathname === "/api/threads" ? [thread] : pathname.endsWith("/goal") ? { goal: null, supported: true, canControl: true } : pathname.startsWith("/api/threads/") ? initialSnapshot : pathname === "/api/models" ? [] : pathname === "/api/fs/list" ? { path: "/tmp", root: "/tmp", parent: null, entries: [] } : [];
       await route.fulfill({ json: { ok: true, data } });
       return;
     }
@@ -23,7 +23,7 @@ async function openConsole(page: Page, onSend: (action: Record<string, unknown>,
     catch { await route.fulfill({ status: 404 }); }
   });
   let latestSocket: { send: (message: string) => void };
-  let latestSnapshot = snapshot;
+  let latestSnapshot = initialSnapshot;
   const emit = (value: unknown) => {
     const event = value as { type?: string; snapshot?: typeof snapshot };
     if (event.type === "thread_snapshot" && event.snapshot) latestSnapshot = event.snapshot;
@@ -42,6 +42,15 @@ async function openConsole(page: Page, onSend: (action: Record<string, unknown>,
   expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe("undefined");
   return errors;
 }
+
+test("a summary snapshot opens the conversation and explains unavailable execution details", async ({ page }) => {
+  const errors = await openConsole(page, () => {}, { ...snapshot, historyDetail: "summary" });
+  await expect(page.locator(".user-message")).toContainText("Original prompt");
+  await expect(page.locator(".final-agent-message")).toContainText("Original answer");
+  await expect(page.getByRole("status").filter({ hasText: "部分历史执行明细暂不可用" })).toBeVisible();
+  await expect(page.getByText("正在加载线程")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
 
 async function resend(page: Page) {
   await page.getByRole("button", { name: "编辑并重新发送最近消息", exact: true }).click();

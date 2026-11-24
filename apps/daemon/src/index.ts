@@ -879,7 +879,7 @@ async function buildServer(): Promise<void> {
       snapshot.compaction = snapshots.get(snapshot.thread.id)?.compaction;
       snapshot.tokenUsage = snapshots.get(snapshot.thread.id)?.tokenUsage ?? snapshot.tokenUsage;
       snapshot.thread = await activityTracker.enrich(snapshot.thread);
-      if (!isTurnActiveStatus(snapshot.thread.status) && !archivedIds.has(snapshot.thread.id)) {
+      if (!snapshot.historyDetail && !isTurnActiveStatus(snapshot.thread.status) && !archivedIds.has(snapshot.thread.id)) {
         await codex.tryTakeControl(snapshot.thread.id);
         snapshot.thread.runtimeSettings = codex.runtimeSettings(snapshot.thread.id) ?? snapshot.thread.runtimeSettings;
       }
