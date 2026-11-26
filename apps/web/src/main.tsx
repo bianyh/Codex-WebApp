@@ -83,6 +83,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { CommandPanel } from "./CommandPanel";
 import { createCommandId } from "./commandId";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { SidebarLayout } from "./SidebarLayout";
 import { changeStatusFromRaw, planFromRaw, tokenUsageFromRaw } from "./protocolMapping";
 import { responseForRequest } from "./requestResponse";
 import { GoalPanel, type GoalControls } from "./GoalPanel";
@@ -433,7 +434,7 @@ function ThreadDrawer({
 }) {
   const filtered = threads;
   return (
-    <aside className={`drawer ${open ? "open" : ""}`}>
+    <aside id="thread-sidebar" className={`drawer ${open ? "open" : ""}`}>
       <div className="drawer-top">
         <div className="brand">
           <div className="brand-mark small">
@@ -1920,7 +1921,7 @@ function App() {
     setVisibleStart(Math.max(0, timelineStart - TIMELINE_CHUNK_SIZE));
   };
   return (
-    <div className={`app-shell ${leftSidebarCollapsed ? "left-collapsed" : ""} ${rightSidebarCollapsed ? "right-collapsed" : ""}`}>
+    <SidebarLayout leftCollapsed={leftSidebarCollapsed} rightCollapsed={rightSidebarCollapsed}>
       <ThreadDrawer
         threads={threads}
         selected={selected}
@@ -2258,7 +2259,7 @@ function App() {
           onClose={() => setContextOpen(false)}
         />
       </div>
-      <aside className="context-desktop">
+      <aside id="context-sidebar" className="context-desktop">
         <ContextPanel
           snapshot={snapshot}
           goalControls={goalControls}
@@ -2328,7 +2329,7 @@ function App() {
       >
         <LogOut size={15} />
       </button>
-    </div>
+    </SidebarLayout>
   );
 }
 

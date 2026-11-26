@@ -46,6 +46,62 @@ async function open(page: Page) {
   return { errors, mutations, actions, emit: (event: unknown) => send(event), panel, tab };
 }
 
+test("mouse dragging resizes and remembers both desktop sidebars", async ({ page }) => {
+  await open(page);
+  const left = page.getByRole("separator", { name: "调整线程侧栏宽度" });
+  const right = page.getByRole("separator", { name: "调整上下文侧栏宽度" });
+  const drag = async (handle: typeof left, offset: number, sidebar: string, expected: number) => {
+    const box = (await handle.boundingBox())!;
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + offset, y, { steps: 5 });
+    await expect.poll(() => page.locator(sidebar).evaluate((node) => node.getBoundingClientRect().width)).toBe(expected);
+    await page.mouse.up();
+  };
+
+  await drag(left, 100, "#thread-sidebar", 392);
+  await drag(right, -110, "#context-sidebar", 460);
+  await page.getByRole("button", { name: "收起线程侧栏" }).click();
+  await expect(left).toBeHidden();
+  await page.getByRole("button", { name: "打开线程侧栏" }).click();
+  await page.getByRole("button", { name: "收起上下文侧栏" }).click();
+  await expect(right).toBeHidden();
+  await page.getByRole("button", { name: "切换上下文侧栏" }).click();
+  await page.reload();
+  await expect(page.locator("#thread-sidebar")).toHaveCSS("width", "392px");
+  await expect(page.locator("#context-sidebar")).toHaveCSS("width", "460px");
+
+  await page.setViewportSize({ width: 1121, height: 900 });
+  await expect(page.locator(".main-column")).toHaveCSS("width", "421px");
+  await page.setViewportSize({ width: 768, height: 900 });
+  await expect(left).toBeVisible();
+  await expect(right).toBeHidden();
+  await expect(page.locator(".main-column")).toHaveCSS("width", "420px");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(left).toBeHidden();
+  await page.getByRole("button", { name: "打开线程列表" }).click();
+  await expect(page.getByRole("button", { name: "关闭侧栏" })).toBeInViewport();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.locator("#thread-sidebar")).toHaveCSS("width", "392px");
+  await expect(page.locator("#context-sidebar")).toHaveCSS("width", "460px");
+});
+
+test("desktop sidebar separators support keyboard resizing within their bounds", async ({ page }) => {
+  await open(page);
+  const right = page.getByRole("separator", { name: "调整上下文侧栏宽度" });
+  await right.focus();
+  await right.press("ArrowLeft");
+  await expect(page.locator("#context-sidebar")).toHaveCSS("width", "366px");
+  await right.press("Home");
+  await right.press("ArrowRight");
+  await expect(page.locator("#context-sidebar")).toHaveCSS("width", "260px");
+  await right.press("End");
+  await right.press("ArrowLeft");
+  await expect(page.locator("#context-sidebar")).toHaveCSS("width", "510px");
+});
+
 test("queue edits preserve attachments and support reorder and cancellation", async ({ page }) => {
   const { panel, tab, mutations, errors } = await open(page); await tab("队列");
   await expect(panel).toContainText("First queued"); await expect(panel).toContainText("note.txt");
