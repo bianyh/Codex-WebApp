@@ -170,7 +170,7 @@ function markdownCodeText(children: React.ReactNode): string {
   return textFromMarkdownNode(children).replace(/\r\n/g, "\n").replace(/\n$/, "");
 }
 
-function MarkdownCopyButton({ text, label = "代码内容" }: { text: string; label?: string }) {
+function CopyButton({ text, label = "代码内容", className = "" }: { text: string; label?: string; className?: string }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const resetTimer = useRef<number | undefined>(undefined);
 
@@ -195,7 +195,7 @@ function MarkdownCopyButton({ text, label = "代码内容" }: { text: string; la
   return (
     <button
       type="button"
-      className={`prose-copy-button ${copyState}`}
+      className={`prose-copy-button ${copyState} ${className}`}
       onClick={copy}
       aria-label={description}
       title={description}
@@ -211,13 +211,13 @@ function CopyableMarkdownBlock({ children, node, ...props }: React.HTMLAttribute
   const code = node?.children[0];
   const language = code?.type === "element" && code.tagName === "code" ? code.properties.className : undefined;
   if (Array.isArray(language) && language.some((name) => String(name).toLowerCase() === "language-mermaid")) {
-    return <MermaidBlock source={text} copyButton={<MarkdownCopyButton text={text} label=" Mermaid 源码" />} />;
+    return <MermaidBlock source={text} copyButton={<CopyButton text={text} label=" Mermaid 源码" />} />;
   }
   return (
     <div className="prose-code-block">
       <div className="prose-code-toolbar">
         <span>代码</span>
-        <MarkdownCopyButton text={text} />
+        <CopyButton text={text} />
       </div>
       <pre {...props}>{children}</pre>
     </div>
@@ -2013,6 +2013,13 @@ function App() {
             文件
           </button>
         </div>
+        {selected && (
+          <div className="thread-id-row">
+            <span>对话 ID</span>
+            <code>{selected}</code>
+            <CopyButton key={selected} text={selected} label="对话 ID" className="thread-id-copy" />
+          </div>
+        )}
         {goalControls.state?.goal && <button className="goal-summary" onClick={openGoalPanel} aria-label="查看当前目标">
           <Target size={15} /><span className={`goal-status ${goalControls.state.goal.status}`}>{goalStatusLabels[goalControls.state.goal.status]}</span><span className="goal-summary-objective">{goalControls.state.goal.objective}</span>
         </button>}

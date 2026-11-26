@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 const origin = "http://10.0.0.123:8787";
-const thread = { id: "code-copy-thread", title: "Code copy", cwd: "/tmp", status: "completed", canRetry: true };
+const thread = { id: "01912345-6789-7abc-8def-0123456789ab", title: "Code copy", cwd: "/tmp", status: "completed", canRetry: true };
 const markdown = [
   "Fenced: `inline code`",
   "",
@@ -100,6 +100,19 @@ test("mobile light theme copies through the HTTP clipboard fallback without over
   await expect.poll(() => page.evaluate(() => (window as Window & { __getCopiedText?: () => string }).__getCopiedText?.())).toBe("const answer = 42;\n  return answer;");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
+test("the conversation header shows and copies the full thread ID on a narrow screen", async ({ page }) => {
+  await openConsole(page, { clipboard: "fallback", light: true });
+  await page.setViewportSize({ width: 320, height: 700 });
+  const label = page.locator(".thread-id-row code");
+  await expect(label).toHaveText(thread.id);
+  await expect(label).toBeInViewport({ ratio: 1 });
+  const copy = page.getByRole("button", { name: "复制对话 ID", exact: true });
+  await expect(copy).toBeInViewport({ ratio: 1 });
+  await copy.click();
+  await expect.poll(() => page.evaluate(() => (window as Window & { __getCopiedText?: () => string }).__getCopiedText?.())).toBe(thread.id);
+  await expect(page.getByRole("button", { name: "已复制对话 ID", exact: true })).toBeVisible();
 });
 
 test("bare Mermaid flowcharts render and retain their Chinese source on mobile", async ({ page }) => {

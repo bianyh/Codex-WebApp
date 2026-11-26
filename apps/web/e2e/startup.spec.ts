@@ -48,7 +48,9 @@ test("restores the last conversation while the sidebar list is still pending", a
   expect(reads).toContain("saved");
   releaseList(); await expect(page.locator(".thread-row")).toHaveCount(2);
   await expect(page.locator(".topbar-title")).toContainText("Thread saved");
+  await expect(page.locator(".thread-id-row code")).toHaveText("saved");
   await page.getByRole("button", { name: /Thread recent/ }).click();
+  await expect(page.locator(".thread-id-row code")).toHaveText("recent");
   await expect(page.locator(".final-agent-message")).toContainText("Latest recent");
   expect(await page.evaluate(() => localStorage.getItem("codex-console-selected-thread"))).toBe("recent");
   expect(errors).toEqual([]);
