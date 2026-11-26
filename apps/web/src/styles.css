@@ -420,6 +420,14 @@ html[data-theme="light"] .prose-copy-button:hover { background: #e7ecf2; color: 
 html[data-theme="light"] .prose-code-block > pre { background: #f8f9fb; border-color: #ccd3dc; color: #263241; }
 html[data-theme="light"] .prose-code-block > pre code { color: #263241; }
 @media (max-width: 720px) { .prose-copy-button { min-height: 44px; } }
+.mermaid-block .prose-code-toolbar { flex-wrap: wrap; }
+.mermaid-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.mermaid-preview { max-height: min(560px, 65dvh); overflow: auto; }
+.mermaid-preview:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.mermaid-preview img { display: block; max-width: none; height: auto; margin-inline: auto; }
+.mermaid-status { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: var(--muted); font-size: 12px; }
+.mermaid-block > pre:not([hidden]) { border-top: 1px solid var(--line); }
+.mermaid-render-container { position: fixed; inset: 0 auto auto 0; width: 1px; height: 1px; overflow: hidden; visibility: hidden; pointer-events: none; }
 .message-branch-button:hover:not(:disabled) { background: var(--panel-2); color: var(--blue); }
 .message-edit-button + .message-branch-button { margin-left: 0; }
 .branch-dialog { width: min(520px, 100%); max-height: calc(100dvh - 44px); overflow-y: auto; padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--soft); box-shadow: 0 24px 70px #0006; }

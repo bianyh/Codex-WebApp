@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { normalizeMarkdownMath } from "./markdown";
+import { normalizeBareMermaid, normalizeMarkdownMath } from "./markdown";
+
+describe("Markdown flowchart compatibility", () => {
+  const diagram = 'flowchart LR\n    A["当前目标"] --> B["执行下一步"]\n    B --> A';
+
+  it("wraps a bare chart while preserving original indentation and surrounding prose", () => {
+    expect(normalizeBareMermaid(`流程如下：\n${diagram}\nAfter (the diagram).`))
+      .toBe(`流程如下：\n\n\`\`\`mermaid\n${diagram}\n\`\`\`\n\nAfter (the diagram).`);
+  });
+
+  it("preserves fenced examples, including longer fences and unfinished code", () => {
+    const source = ["````text", "```", diagram, "````", "~~~text", diagram].join("\n");
+    expect(normalizeBareMermaid(source)).toBe(source);
+  });
+
+  it("requires diagram statements and leaves indented snippets alone", () => {
+    const source = "graph TD\nordinary text\n\n    flowchart LR\n      A --> B";
+    expect(normalizeBareMermaid(source)).toBe(source);
+  });
+});
 
 describe("Markdown math compatibility", () => {
   it("normalizes standard LaTeX display and inline delimiters", () => {

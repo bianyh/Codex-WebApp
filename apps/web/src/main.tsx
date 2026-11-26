@@ -74,7 +74,8 @@ import type {
 } from "./types";
 import { FilePreview, WorkspaceFiles, copyText, fileEntryFromPath, type FsEntry } from "./WorkspaceFiles";
 import { resolveLocalFileHref } from "./fileLinks";
-import { normalizeMarkdownMath } from "./markdown";
+import { normalizeBareMermaid, normalizeMarkdownMath } from "./markdown";
+import { MermaidBlock, MermaidTheme } from "./MermaidBlock";
 import { createOptimisticUserItem, mergeTimelineItem, textFromRawItem } from "./messageState";
 import { formatMessageTimestamp } from "./messageTime";
 import { NewThreadDialog } from "./NewThreadDialog";
@@ -168,10 +169,9 @@ function markdownCodeText(children: React.ReactNode): string {
   return textFromMarkdownNode(children).replace(/\r\n/g, "\n").replace(/\n$/, "");
 }
 
-function CopyableMarkdownBlock({ children, node: _node, ...props }: React.HTMLAttributes<HTMLPreElement> & ExtraProps) {
+function MarkdownCopyButton({ text, label = "代码内容" }: { text: string; label?: string }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const resetTimer = useRef<number | undefined>(undefined);
-  const text = useMemo(() => markdownCodeText(children), [children]);
 
   useEffect(() => () => {
     if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
@@ -190,20 +190,33 @@ function CopyableMarkdownBlock({ children, node: _node, ...props }: React.HTMLAt
   }, [text]);
 
   const status = copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败" : "复制";
+  const description = `${status}${label}`;
+  return (
+    <button
+      type="button"
+      className={`prose-copy-button ${copyState}`}
+      onClick={copy}
+      aria-label={description}
+      title={description}
+    >
+      {copyState === "copied" ? <Check size={14} /> : <Copy size={14} />}
+      <span aria-live="polite" aria-atomic="true">{status}</span>
+    </button>
+  );
+}
+
+function CopyableMarkdownBlock({ children, node, ...props }: React.HTMLAttributes<HTMLPreElement> & ExtraProps) {
+  const text = markdownCodeText(children);
+  const code = node?.children[0];
+  const language = code?.type === "element" && code.tagName === "code" ? code.properties.className : undefined;
+  if (Array.isArray(language) && language.some((name) => String(name).toLowerCase() === "language-mermaid")) {
+    return <MermaidBlock source={text} copyButton={<MarkdownCopyButton text={text} label=" Mermaid 源码" />} />;
+  }
   return (
     <div className="prose-code-block">
       <div className="prose-code-toolbar">
         <span>代码</span>
-        <button
-          type="button"
-          className={`prose-copy-button ${copyState}`}
-          onClick={copy}
-          aria-label={`${status}代码内容`}
-          title={`${status}代码内容`}
-        >
-          {copyState === "copied" ? <Check size={14} /> : <Copy size={14} />}
-          <span aria-live="polite" aria-atomic="true">{status}</span>
-        </button>
+        <MarkdownCopyButton text={text} />
       </div>
       <pre {...props}>{children}</pre>
     </div>
@@ -240,7 +253,7 @@ const MessageMarkdown = memo(function MessageMarkdown({ text, cwd, onOpenFile }:
         },
       }}
     >
-      {normalizeMarkdownMath(text)}
+      {normalizeMarkdownMath(normalizeBareMermaid(text))}
     </ReactMarkdown>
   );
 });
@@ -2022,7 +2035,7 @@ function App() {
             </div>
           )}
           {snapshot && (
-            <>
+            <MermaidTheme value={theme}>
               {snapshot.historyDetail === "summary" && (
                 <div className="timeline-error-card" role="status">
                   <CircleAlert size={16} />
@@ -2054,7 +2067,7 @@ function App() {
                 onBranch={beginBranch}
                 branchDisabledReason={turnIsActive || snapshot.compaction === "running" || queuedTurns.length ? "请先结束当前任务并处理排队指令，再创建分支" : selectedArchived ? "请先恢复归档线程" : undefined}
               />
-            </>
+            </MermaidTheme>
           )}
           {snapshot?.items.length === 0 && (
             <div className="empty-thread">
