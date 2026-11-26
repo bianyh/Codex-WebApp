@@ -72,7 +72,7 @@ import type {
   ExecutionSettings,
   QueueEntry,
 } from "./types";
-import { FilePreview, WorkspaceFiles, copyText, fileEntryFromPath, type FsEntry } from "./WorkspaceFiles";
+import { FilePreview, WorkspaceFiles, fileEntryFromPath, type FsEntry } from "./WorkspaceFiles";
 import { resolveLocalFileHref } from "./fileLinks";
 import { normalizeBareMermaid, normalizeMarkdownMath } from "./markdown";
 import { MermaidBlock, MermaidTheme } from "./MermaidBlock";
@@ -95,6 +95,7 @@ import { useThreadEntryScroll } from "./useThreadEntryScroll";
 import { StructuredItem } from "./StructuredItem";
 import { ThreadActions } from "./ThreadActions";
 import { BranchDialog } from "./BranchDialog";
+import { CopyButton } from "./CopyButton";
 import type { ThreadForkInput } from "../../daemon/src/threadFork";
 import { itemStartedAtFromRaw, runtimeSettingsFromRaw, structuredItem } from "../../daemon/src/runtimeMapping";
 import "./styles.css";
@@ -168,42 +169,6 @@ function markdownCodeText(children: React.ReactNode): string {
   // react-markdown includes one delimiter newline in fenced blocks; it is not
   // part of the text the user sees and should not be copied.
   return textFromMarkdownNode(children).replace(/\r\n/g, "\n").replace(/\n$/, "");
-}
-
-function CopyButton({ text, label = "代码内容", className = "" }: { text: string; label?: string; className?: string }) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const resetTimer = useRef<number | undefined>(undefined);
-
-  useEffect(() => () => {
-    if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
-  }, []);
-
-  const copy = useCallback(() => {
-    void copyText(text).then(() => {
-      setCopyState("copied");
-      if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
-      resetTimer.current = window.setTimeout(() => setCopyState("idle"), 1600);
-    }).catch(() => {
-      setCopyState("failed");
-      if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
-      resetTimer.current = window.setTimeout(() => setCopyState("idle"), 2200);
-    });
-  }, [text]);
-
-  const status = copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败" : "复制";
-  const description = `${status}${label}`;
-  return (
-    <button
-      type="button"
-      className={`prose-copy-button ${copyState} ${className}`}
-      onClick={copy}
-      aria-label={description}
-      title={description}
-    >
-      {copyState === "copied" ? <Check size={14} /> : <Copy size={14} />}
-      <span aria-live="polite" aria-atomic="true">{status}</span>
-    </button>
-  );
 }
 
 function CopyableMarkdownBlock({ children, node, ...props }: React.HTMLAttributes<HTMLPreElement> & ExtraProps) {
@@ -1957,7 +1922,7 @@ function App() {
             <h2>{currentThread?.title ?? "选择一个线程"}</h2>
           </div>
           <div className="topbar-actions">
-            <button className="icon-button" disabled={!snapshot} onClick={() => setThreadActionsOpen(true)} aria-label="线程操作" title="重命名、分支和归档"><MoreHorizontal size={18} /></button>
+            <button className="icon-button" disabled={!snapshot} onClick={() => setThreadActionsOpen(true)} aria-label="线程操作" title="查看对话 ID、重命名、分支和归档"><MoreHorizontal size={18} /></button>
             <button className="icon-button" disabled={!selected} onClick={openGoalPanel} aria-label="打开目标控制" title="目标模式"><Target size={18} /></button>
             <span className={`connection-label ${connection}`}>
               <span className="connection-dot" />
@@ -2013,13 +1978,6 @@ function App() {
             文件
           </button>
         </div>
-        {selected && (
-          <div className="thread-id-row">
-            <span>对话 ID</span>
-            <code>{selected}</code>
-            <CopyButton key={selected} text={selected} label="对话 ID" className="thread-id-copy" />
-          </div>
-        )}
         {goalControls.state?.goal && <button className="goal-summary" onClick={openGoalPanel} aria-label="查看当前目标">
           <Target size={15} /><span className={`goal-status ${goalControls.state.goal.status}`}>{goalStatusLabels[goalControls.state.goal.status]}</span><span className="goal-summary-objective">{goalControls.state.goal.objective}</span>
         </button>}

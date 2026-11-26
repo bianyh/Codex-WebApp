@@ -102,17 +102,20 @@ test("mobile light theme copies through the HTTP clipboard fallback without over
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
-test("the conversation header shows and copies the full thread ID on a narrow screen", async ({ page }) => {
+test("thread actions show and copy the full thread ID on a narrow screen", async ({ page }) => {
   await openConsole(page, { clipboard: "fallback", light: true });
   await page.setViewportSize({ width: 320, height: 700 });
-  const label = page.locator(".thread-id-row code");
+  await expect(page.getByText(thread.id, { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "线程操作", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "线程操作" });
+  const label = dialog.getByText(thread.id, { exact: true });
   await expect(label).toHaveText(thread.id);
   await expect(label).toBeInViewport({ ratio: 1 });
-  const copy = page.getByRole("button", { name: "复制对话 ID", exact: true });
+  const copy = dialog.getByRole("button", { name: "复制对话 ID", exact: true });
   await expect(copy).toBeInViewport({ ratio: 1 });
   await copy.click();
   await expect.poll(() => page.evaluate(() => (window as Window & { __getCopiedText?: () => string }).__getCopiedText?.())).toBe(thread.id);
-  await expect(page.getByRole("button", { name: "已复制对话 ID", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "已复制对话 ID", exact: true })).toBeVisible();
 });
 
 test("bare Mermaid flowcharts render and retain their Chinese source on mobile", async ({ page }) => {

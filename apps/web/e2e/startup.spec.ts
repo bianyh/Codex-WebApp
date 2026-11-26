@@ -48,10 +48,15 @@ test("restores the last conversation while the sidebar list is still pending", a
   expect(reads).toContain("saved");
   releaseList(); await expect(page.locator(".thread-row")).toHaveCount(2);
   await expect(page.locator(".topbar-title")).toContainText("Thread saved");
-  await expect(page.locator(".thread-id-row code")).toHaveText("saved");
+  const actions = page.getByRole("button", { name: "线程操作", exact: true });
+  const dialog = page.getByRole("dialog", { name: "线程操作" });
+  await actions.click();
+  await expect(dialog.locator("code")).toHaveText("saved");
+  await dialog.getByRole("button", { name: "关闭线程操作" }).click();
   await page.getByRole("button", { name: /Thread recent/ }).click();
-  await expect(page.locator(".thread-id-row code")).toHaveText("recent");
   await expect(page.locator(".final-agent-message")).toContainText("Latest recent");
+  await actions.click();
+  await expect(dialog.locator("code")).toHaveText("recent");
   expect(await page.evaluate(() => localStorage.getItem("codex-console-selected-thread"))).toBe("recent");
   expect(errors).toEqual([]);
 });

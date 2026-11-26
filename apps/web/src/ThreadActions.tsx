@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
+import { CopyButton } from "./CopyButton";
 import type { Thread } from "./types";
 
 export function ThreadActions({ thread, archived, onAction, onClose }: { thread: Thread; archived: boolean; onAction: (action: "name" | "fork" | "archive" | "unarchive", name?: string) => Promise<void>; onClose: () => void }) {
@@ -10,6 +11,13 @@ export function ThreadActions({ thread, archived, onAction, onClose }: { thread:
   useEffect(() => { const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && !busy) onClose(); }; window.addEventListener("keydown", escape); return () => window.removeEventListener("keydown", escape); }, [busy, onClose]);
   const run = async (action: "name" | "fork" | "archive" | "unarchive") => { if (busy) return; if (action === "archive" && !window.confirm("归档此线程？不会删除聊天记录或文件。")) return; setBusy(true); setError(""); try { await onAction(action, name.trim()); onClose(); } catch (reason) { setError(reason instanceof Error ? reason.message : "线程操作失败"); } finally { setBusy(false); } };
   return <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="线程操作"><section className="thread-actions-dialog"><header><h3>线程操作</h3><button className="icon-button" disabled={busy} onClick={onClose} aria-label="关闭线程操作"><X size={18} /></button></header>
+    <dl className="thread-id-details">
+      <dt>对话 ID</dt>
+      <dd>
+        <code>{thread.id}</code>
+        <CopyButton key={thread.id} text={thread.id} label="对话 ID" className="thread-id-copy" />
+      </dd>
+    </dl>
     <label>线程名称<input aria-label="线程名称" value={name} maxLength={200} onChange={(event) => setName(event.target.value)} /></label>
     <button disabled={busy || !name.trim()} onClick={() => void run("name")}>保存名称</button>
     <button disabled={busy || active || archived} onClick={() => void run("fork")}>创建对话分支</button><p className="muted">复制截至当前的历史到新线程；原线程和文件不回退。</p>
