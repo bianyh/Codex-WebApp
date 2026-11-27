@@ -386,6 +386,7 @@ PATCH /api/projects/:projectId
 
 GET  /api/fs/list?path=
 POST /api/fs/upload?path=&name=&mime=
+POST /api/uploads?name=&mime=
 POST /api/fs/directories
 GET  /api/fs/server-directories?path=
 POST /api/fs/server-directories
@@ -419,6 +420,8 @@ type ApiResponse<T> =
 Office 预览会在加载阅读器模块时并行请求转换。daemon 验证鉴权、文件路径、类型和可读权限后按源文件标识及修改时间合并同版本转换，并在转换结束后再次检查源版本。成功的结果只缓存在内存中，最长 15 分钟，最多 24 份且总计不超过 96 MiB；缓存命中不占用转换槽。
 
 ### 8.2 WebSocket 客户端动作
+
+上传在读取请求体前校验会话。两个入口以流式方式写入目标目录下的私有临时文件，不设应用层文件大小上限；完整接收后才创建最终文件名，且不覆盖同名文件。浏览器按已发送字节显示进度，收到保存确认后才标记完成。空闲部署也会等待活动上传。
 
 ```ts
 type ClientAction =

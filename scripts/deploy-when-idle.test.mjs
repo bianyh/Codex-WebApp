@@ -61,7 +61,7 @@ describe("deferred deployment", () => {
     expect(isIdleHealth(ready)).toBe(true);
     expect(isIdleHealth(undefined)).toBe(false);
     expect(isIdleHealth({ ...ready, data: { ...ready.data, activeThreads: 1 } })).toBe(false);
-    for (const key of ["activeCommands", "queuedTurns", "pendingRequests", "turnOperations"]) {
+    for (const key of ["activeCommands", "activeUploads", "queuedTurns", "pendingRequests", "turnOperations"]) {
       expect(isIdleHealth({ ...ready, data: { ...ready.data, [key]: 1 } })).toBe(false);
     }
   });

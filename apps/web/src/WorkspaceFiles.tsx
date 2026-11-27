@@ -5,6 +5,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { normalizeMarkdownMath } from "./markdown";
+import { FileDropHint, FileUploadProgress, useFileDrop, useFileUploads } from "./fileUpload";
 import {
   ArrowLeft,
   Check,
@@ -187,7 +188,8 @@ export function WorkspaceFiles({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showHidden, setShowHidden] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const { upload, progress: uploadProgress, active: activeUpload } = useFileUploads();
+  const uploading = Boolean(uploadProgress);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const load = async (target?: string) => {
@@ -209,37 +211,26 @@ export function WorkspaceFiles({
     void load(rootPath);
   }, [rootPath]);
   const uploadFiles = async (fileList: FileList | null) => {
-    if (!fileList?.length || !listing || uploading) return;
+    if (!fileList?.length || !listing || loading || activeUpload.current) return;
     const files = Array.from(fileList);
-    const invalid = files.find((file) => file.size === 0 || file.size > 25 * 1024 * 1024);
-    if (invalid) {
-      setError(`${invalid.name} 为空或超过 25 MiB`);
-      return;
-    }
-    setUploading(true);
+    const directory = listing.path;
     setError("");
     try {
-      for (const file of files) {
-        const response = await fetch(
-          `/api/fs/upload?path=${encodeURIComponent(listing.path)}&name=${encodeURIComponent(file.name)}&mime=${encodeURIComponent(file.type || "application/octet-stream")}`,
-          {
-            method: "POST",
-            credentials: "include",
-            headers: { "content-type": "application/octet-stream" },
-            body: file,
-          },
-        );
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body?.error?.message ?? `无法上传 ${file.name}`);
-      }
-      await load(listing.path);
+      await upload<FsEntry>(files, (file) =>
+        `/api/fs/upload?path=${encodeURIComponent(directory)}&name=${encodeURIComponent(file.name)}`,
+      (entry) => setListing((current) => current?.path === directory ? {
+        ...current,
+        entries: [...current.entries.filter((file) => file.path !== entry.path), entry]
+          .sort((left, right) => left.type === right.type ? left.name.localeCompare(right.name) : left.type === "directory" ? -1 : 1),
+      } : current));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法上传文件");
     } finally {
-      setUploading(false);
       if (uploadInputRef.current) uploadInputRef.current.value = "";
     }
   };
+  const dropBlocked = !listing || loading ? "请等待当前目录加载完成" : uploading ? "请等待当前文件上传完成" : undefined;
+  const fileDrop = useFileDrop((files) => void uploadFiles(files), setError, dropBlocked);
   const copyAbsolutePath = async (entry: FsEntry) => {
     try {
       await copyText(entry.path);
@@ -271,7 +262,8 @@ export function WorkspaceFiles({
     });
   };
   return (
-    <div className="workspace-files">
+    <div className="workspace-files" {...fileDrop.handlers}>
+      {fileDrop.dragging && <FileDropHint message={dropBlocked ?? "松开以上传到当前目录"} />}
       <div className="file-toolbar">
         <button
           className="mini-tool"
@@ -304,14 +296,15 @@ export function WorkspaceFiles({
         />
         <button
           className="mini-tool"
-          disabled={!listing || loading || uploading}
+          disabled={Boolean(dropBlocked)}
           onClick={() => uploadInputRef.current?.click()}
-          title="上传文件到当前目录"
+          title="点击选择文件，或拖入 Files 面板上传到当前目录"
           aria-label="上传文件到当前目录"
         >
           {uploading ? <LoaderCircle className="spin" size={14} /> : <Upload size={14} />}
         </button>
       </div>
+      {uploadProgress && <FileUploadProgress progress={uploadProgress} />}
       {changedFiles?.length ? (
         <div className="changed-files-strip">
           <div className="files-subtitle">本次修改</div>

@@ -8,7 +8,7 @@ import { artifactFingerprint, validateBuildManifest } from "./build-manifest.mjs
 export function isIdleHealth(response) {
   const state = response?.data;
   return response?.ok === true && state?.ok === true && state.appServer === "ready" && state.activeThreads === 0 &&
-    [state.activeCommands, state.queuedTurns, state.pendingRequests, state.turnOperations].every((count) => count === undefined || count === 0);
+    [state.activeCommands, state.activeUploads, state.queuedTurns, state.pendingRequests, state.turnOperations].every((count) => count === undefined || count === 0);
 }
 
 export async function waitForIdle({ readHealth, sleep, requiredSamples = 6, onState = () => {} }) {

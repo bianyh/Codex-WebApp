@@ -73,6 +73,7 @@ import type {
   QueueEntry,
 } from "./types";
 import { FilePreview, WorkspaceFiles, fileEntryFromPath, type FsEntry } from "./WorkspaceFiles";
+import { FileDropHint, FileUploadProgress, useFileDrop, useFileUploads } from "./fileUpload";
 import { resolveLocalFileHref } from "./fileLinks";
 import { normalizeBareMermaid, normalizeMarkdownMath } from "./markdown";
 import { MermaidBlock, MermaidTheme } from "./MermaidBlock";
@@ -94,8 +95,8 @@ import { ExecutionSettingsMenu } from "./ExecutionSettingsMenu";
 import { useThreadEntryScroll } from "./useThreadEntryScroll";
 import { StructuredItem } from "./StructuredItem";
 import { ThreadActions } from "./ThreadActions";
-import { BranchDialog } from "./BranchDialog";
 import { CopyButton } from "./CopyButton";
+import { BranchDialog } from "./BranchDialog";
 import type { ThreadForkInput } from "../../daemon/src/threadFork";
 import { itemStartedAtFromRaw, runtimeSettingsFromRaw, structuredItem } from "../../daemon/src/runtimeMapping";
 import "./styles.css";
@@ -1006,7 +1007,9 @@ function App() {
   const [defaultModel, setDefaultModel] = useState(() => localStorage.getItem("codex-console-default-model") ?? "");
   const [threadModels, setThreadModels] = useState<Record<string, string>>(storedThreadModels);
   const [attachments, setAttachments] = useState<UploadAttachment[]>([]);
-  const [uploading, setUploading] = useState(false);
+  const { upload: uploadAttachments, progress: uploadProgress, active: activeUpload, cancel: cancelAttachmentUpload } = useFileUploads();
+  const uploading = Boolean(uploadProgress);
+  useEffect(() => cancelAttachmentUpload, [selected, cancelAttachmentUpload]);
   const wsRef = useRef<WebSocket | null>(null);
   const subscribedThreadRef = useRef<string | null>(null);
   const readyThreadRef = useRef<string | null>(null);
@@ -1676,49 +1679,45 @@ function App() {
     });
   };
   const uploadFiles = async (fileList: FileList | readonly File[] | null) => {
-    if (!fileList?.length || uploading) return;
+    if (!fileList?.length || activeUpload.current) return;
+    if (editingLastMessage) {
+      setError("编辑并重新发送最近消息时暂不支持添加附件");
+      return;
+    }
     const files = Array.from(fileList);
     if (files.length + attachments.length > 8) {
       setError("每条消息最多添加 8 个附件");
       return;
     }
-    const invalid = files.find((file) => file.size === 0 || file.size > 25 * 1024 * 1024);
-    if (invalid) {
-      setError(`${invalid.name} 为空或超过 25 MiB`);
-      return;
-    }
-    setUploading(true);
+    const threadId = selectedThreadRef.current;
+    setError("");
     try {
-      const uploaded = await Promise.all(files.map(async (file) => {
-        const response = await fetch(
-          `/api/uploads?name=${encodeURIComponent(file.name)}&mime=${encodeURIComponent(file.type || "application/octet-stream")}`,
-          {
-            method: "POST",
-            credentials: "include",
-            headers: { "content-type": "application/octet-stream" },
-            body: file,
-          },
-        );
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body?.error?.message ?? `无法上传 ${file.name}`);
-        const attachment = body.data as UploadAttachment;
-        return {
+      await uploadAttachments<UploadAttachment>(files, (file) =>
+        `/api/uploads?name=${encodeURIComponent(file.name)}&mime=${encodeURIComponent(file.type || "application/octet-stream")}`,
+      (attachment, file) => {
+        if (selectedThreadRef.current !== threadId) return;
+        const item = {
           ...attachment,
           previewUrl: attachment.kind === "image" ? URL.createObjectURL(file) : undefined,
         };
-      }));
-      setAttachments((items) => [...items, ...uploaded]);
+        setAttachments((items) => [...items, item]);
+      });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "附件上传失败");
     } finally {
-      setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
+  const attachmentDropBlocked = uploading ? "请等待当前附件上传完成"
+    : editingLastMessage ? "编辑并重新发送最近消息时暂不支持添加附件"
+    : attachments.length >= 8 ? "每条消息最多添加 8 个附件"
+    : undefined;
+  const attachmentDrop = useFileDrop((files) => void uploadFiles(files), setError, attachmentDropBlocked);
   const send = async () => {
     const text = input.trim();
     if (
       (!text && attachments.length === 0) ||
+      activeUpload.current ||
       !selected ||
       !wsRef.current ||
       wsRef.current.readyState !== WebSocket.OPEN
@@ -2085,7 +2084,8 @@ function App() {
           <ApprovalBar key={requests[0].id} request={requests[0]} onRespond={respond} />
         )}
         <div className="composer-wrap">
-          <div className="composer">
+          <div className="composer" {...attachmentDrop.handlers}>
+            {attachmentDrop.dragging && <FileDropHint message={attachmentDropBlocked ?? "松开以上传为对话附件"} />}
             {editingLastMessage && (
               <div className="composer-edit-banner">
                 <RotateCcw size={14} />
@@ -2111,6 +2111,7 @@ function App() {
                 ))}
               </div>
             )}
+            {uploadProgress && <FileUploadProgress progress={uploadProgress} />}
             <textarea
               ref={composerRef}
               value={input}
@@ -2119,10 +2120,6 @@ function App() {
                 const files = filesFromClipboard(event.clipboardData);
                 if (files.length === 0) return;
                 event.preventDefault();
-                if (editingLastMessage) {
-                  setError("编辑并重新发送最近消息时暂不支持添加附件");
-                  return;
-                }
                 void uploadFiles(files);
               }}
               onKeyDown={(e) => {
@@ -2154,8 +2151,8 @@ function App() {
                 <button
                   className="tool-button"
                   aria-label="添加图片或文件"
-                  title="添加图片或文件"
-                  disabled={uploading || Boolean(editingLastMessage) || attachments.length >= 8}
+                  title="点击选择图片或文件，或拖入输入框"
+                  disabled={Boolean(attachmentDropBlocked)}
                   onClick={() => fileInputRef.current?.click()}
                 >
                   {uploading ? <LoaderCircle className="spin" size={15} /> : <Paperclip size={16} />}

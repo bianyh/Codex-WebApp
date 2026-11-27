@@ -84,7 +84,7 @@ CODEX_CONSOLE_PORT=8787 \
 npm run start
 ```
 
-The new-thread dialog and Files panel can navigate to any server path available to the daemon's operating-system user. Absolute paths are used directly, and relative paths are resolved from `CODEX_CWD`. The Files panel can upload files, create directories, preview or download files, and copy server-side absolute paths anywhere that user has permission. Text previews are limited to 5 MiB, individual uploads to 25 MiB, and each message to eight attachments.
+The new-thread dialog and Files panel can navigate to any server path available to the daemon's operating-system user. Absolute paths are used directly, and relative paths are resolved from `CODEX_CWD`. The Files panel can upload files, create directories, preview or download files, and copy server-side absolute paths anywhere that user has permission. Files panel and chat uploads show byte-based progress and stream to disk without an application-level file size cap. Available storage, reverse proxy limits/timeouts, and Codex provider limits may still apply. Text previews are limited to 5 MiB, and each message can include up to eight attachments.
 
 PDF links such as `report.pdf#page=5` open at page 5. Scroll up or down to browse pages continuously. Use `−` and `+`, or hold Ctrl while scrolling over the document to zoom continuously around the pointer. Click the percentage to fit the width again. The viewer redraws visible content at the new scale instead of stretching the old bitmap.
 

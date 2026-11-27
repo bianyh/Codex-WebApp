@@ -1,7 +1,8 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { stdin as processStdin } from "node:process";
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
@@ -23,6 +24,7 @@ import { ThreadIndexReconciler } from "./threadIndex.js";
 import { threadForkSchema } from "./threadFork.js";
 import { runWorkspaceCommand } from "./workspaceCommand.js";
 import { resolveServerDirectory, resolveServerPath } from "./serverDirectory.js";
+import { saveUpload, UploadBodyError } from "./upload.js";
 import { officePreviewKind, OfficePreviewCache, OfficePreviewError } from "./officePreview.js";
 import type { ConsoleEvent, GoalState, ModelOption, ThreadSnapshot, ThreadStatus, ThreadSummary, TurnAttachment, TurnInput } from "./types.js";
 
@@ -102,7 +104,7 @@ function broadcast(payload: unknown, threadId?: string): void {
 }
 
 const uploadRoot = path.join(config.dataDir, "uploads");
-const maxUploadBytes = 25 * 1024 * 1024;
+let activeUploads = 0;
 
 function customModelOption(model: string, displayName: string): ModelOption {
   return {
@@ -177,8 +179,8 @@ async function resolveTurnInput(action: Record<string, unknown>): Promise<TurnIn
       throw new Error("附件不属于本控制台的上传目录");
     }
     const metadata = await stat(canonicalPath);
-    if (!metadata.isFile() || metadata.size > maxUploadBytes) {
-      throw new Error("附件不存在或超过 25 MiB");
+    if (!metadata.isFile()) {
+      throw new Error("附件不存在或不是文件");
     }
     const mime =
       typeof value.mime === "string" && value.mime.length <= 160
@@ -505,11 +507,6 @@ async function buildServer(): Promise<void> {
   await loadState();
   await daemon.register(cookie);
   await daemon.register(websocket);
-  daemon.addContentTypeParser(
-    "application/octet-stream",
-    { parseAs: "buffer" },
-    (_request, body, done) => done(null, body),
-  );
   const activityTimer = setInterval(scheduleThreadActivityRefresh, 1200);
   activityTimer.unref();
   daemon.addHook("onClose", async () => {
@@ -518,7 +515,7 @@ async function buildServer(): Promise<void> {
     for (const controller of runningCommands.values()) controller.abort();
     runningCommands.clear();
   });
-  daemon.get("/api/healthz", async (request) => ok(request, { ok: true, daemonVersion: "0.1.0", buildRevision: process.env.CODEX_CONSOLE_BUILD_REVISION, codexVersion: codex.version, appServer: codex.version === "unknown" ? "starting" : "ready", activeThreads: [...lastActivities.values()].filter((activity) => isTurnActiveStatus(activity.status)).length, activeCommands: runningCommands.size, queuedTurns: [...queuedTurns.values()].reduce((total, queue) => total + queue.length, 0), pendingRequests: [...snapshots.keys()].reduce((total, threadId) => total + codex.getPendingRequests(threadId).length, 0), turnOperations: turnOperations.size + activeCompactions.size, loadedThreads: snapshots.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }));
+  daemon.get("/api/healthz", async (request) => ok(request, { ok: true, daemonVersion: "0.1.0", buildRevision: process.env.CODEX_CONSOLE_BUILD_REVISION, codexVersion: codex.version, appServer: codex.version === "unknown" ? "starting" : "ready", activeThreads: [...lastActivities.values()].filter((activity) => isTurnActiveStatus(activity.status)).length, activeCommands: runningCommands.size, activeUploads, queuedTurns: [...queuedTurns.values()].reduce((total, queue) => total + queue.length, 0), pendingRequests: [...snapshots.keys()].reduce((total, threadId) => total + codex.getPendingRequests(threadId).length, 0), turnOperations: turnOperations.size + activeCompactions.size, loadedThreads: snapshots.size, uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }));
   daemon.post<{ Body: { password?: string } }>("/api/auth/login", async (request, reply) => { await login(request, reply, typeof request.body?.password === "string" ? request.body.password : ""); return; });
   daemon.post("/api/auth/logout", async (request, reply) => { if (!(await requireAuth(request, reply))) return; await logout(request, reply); });
   daemon.get("/api/auth/me", async (request, reply) => { if (!(await requireAuth(request, reply))) return; return ok(request, { authenticated: true, passwordConfigured: Boolean(getState().passwordHash), codexVersion: codex.version }); });
@@ -569,79 +566,44 @@ async function buildServer(): Promise<void> {
     return ok(request, null);
   });
 
-  daemon.post<{
-    Querystring: { name?: string; mime?: string };
-    Body: Buffer;
-  }>("/api/uploads", { bodyLimit: maxUploadBytes }, async (request, reply) => {
-    if (!(await requireAuth(request, reply))) return;
-    const body = request.body;
-    if (!Buffer.isBuffer(body) || body.length === 0) {
-      return reply.code(400).send(failure(request, "empty_upload", "上传文件不能为空"));
-    }
-    if (body.length > maxUploadBytes) {
-      return reply.code(413).send(failure(request, "upload_too_large", "单个附件不能超过 25 MiB"));
-    }
-    const originalName = path.basename(request.query.name?.trim() || "attachment").slice(0, 180);
-    const mime = request.query.mime?.slice(0, 160) || "application/octet-stream";
-    const rawExtension = path.extname(originalName).toLowerCase();
-    const extension = /^\.[a-z0-9]{1,12}$/.test(rawExtension) ? rawExtension : "";
-    const directory = path.join(uploadRoot, new Date().toISOString().slice(0, 10));
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const id = randomUUID();
-    const storedPath = path.join(directory, `${id}${extension}`);
-    await writeFile(storedPath, body, { mode: 0o600, flag: "wx" });
-    return reply.code(201).send(ok(request, {
-      id,
-      name: originalName,
-      path: storedPath,
-      mime,
-      size: body.length,
-      kind: uploadKind(mime),
-    }));
-  });
-
-  daemon.post<{
-    Querystring: { path?: string; name?: string; mime?: string };
-    Body: Buffer;
-  }>("/api/fs/upload", { bodyLimit: maxUploadBytes }, async (request, reply) => {
-    if (!(await requireAuth(request, reply))) return;
-    const body = request.body;
-    if (!Buffer.isBuffer(body) || body.length === 0) {
-      return reply.code(400).send(failure(request, "empty_upload", "上传文件不能为空"));
-    }
-    if (body.length > maxUploadBytes) {
-      return reply.code(413).send(failure(request, "upload_too_large", "单个文件不能超过 25 MiB"));
-    }
-    const rawName = request.query.name?.trim() ?? "";
-    const name = path.basename(rawName).slice(0, 180);
-    if (
-      !rawName ||
-      rawName !== name ||
-      name === "." ||
-      name === ".." ||
-      /[\\/\u0000-\u001f\u007f]/.test(name)
-    ) {
-      return reply.code(400).send(failure(request, "invalid_upload_name", "文件名不能包含路径分隔符或控制字符"));
-    }
-    try {
-      const directory = await resolveServerDirectory(request.query.path || config.codexCwd, config.codexCwd);
-      const storedPath = path.join(directory, name);
-      await writeFile(storedPath, body, { mode: 0o600, flag: "wx" });
-      const canonicalPath = await resolveServerPath(storedPath, directory);
-      const metadata = await stat(canonicalPath);
-      return reply.code(201).send(ok(request, {
-        name,
-        path: canonicalPath,
-        type: "file",
-        kind: fileKind(canonicalPath),
-        size: metadata.size,
-        modifiedAt: metadata.mtime.toISOString(),
-        hidden: name.startsWith("."),
-      }));
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "EEXIST") return reply.code(409).send(failure(request, "file_exists", "同名文件已经存在"));
-      return reply.code(400).send(failure(request, "upload_failed", error instanceof Error ? error.message : "无法上传文件"));
+  await daemon.register(async (uploads) => {
+    uploads.addHook("onRequest", async (request, reply) => { await requireAuth(request, reply); });
+    uploads.addContentTypeParser("application/octet-stream", (_request, payload, done) => done(null, payload));
+    for (const [route, attachment] of [["/api/uploads", true], ["/api/fs/upload", false]] as const) {
+      uploads.post<{ Querystring: { path?: string; name?: string; mime?: string }; Body: Readable }>(route, async (request, reply) => {
+        if (!(request.body instanceof Readable)) return reply.code(415).send(failure(request, "invalid_upload", "仅支持二进制文件上传"));
+        const rawName = typeof request.query.name === "string" ? request.query.name.trim() : "";
+        const name = path.basename(rawName || (attachment ? "attachment" : "")).slice(0, 180);
+        if (!attachment && (!rawName || rawName !== name || name === "." || name === ".." || /[\\/\u0000-\u001f\u007f]/.test(name))) {
+          return reply.code(400).send(failure(request, "invalid_upload_name", "文件名不能包含路径分隔符或控制字符"));
+        }
+        activeUploads++;
+        try {
+          if (attachment) {
+            const mime = typeof request.query.mime === "string" ? request.query.mime.slice(0, 160) || "application/octet-stream" : "application/octet-stream";
+            const rawExtension = path.extname(name).toLowerCase();
+            const extension = /^\.[a-z0-9]{1,12}$/.test(rawExtension) ? rawExtension : "";
+            const directory = path.join(uploadRoot, new Date().toISOString().slice(0, 10));
+            await mkdir(directory, { recursive: true, mode: 0o700 });
+            const id = randomUUID();
+            const storedPath = path.join(await resolveServerDirectory(directory, config.codexCwd), `${id}${extension}`);
+            const { size } = await saveUpload(request.body, storedPath, request.headers["content-length"]);
+            return reply.code(201).send(ok(request, { id, name, path: storedPath, mime, size, kind: uploadKind(mime) }));
+          }
+          const directory = await resolveServerDirectory(request.query.path || config.codexCwd, config.codexCwd);
+          const storedPath = path.join(directory, name);
+          const metadata = await saveUpload(request.body, storedPath, request.headers["content-length"]);
+          return reply.code(201).send(ok(request, { name, path: storedPath, type: "file", kind: fileKind(storedPath), size: metadata.size, modifiedAt: metadata.mtime.toISOString(), hidden: name.startsWith(".") }));
+        } catch (error) {
+          if (error instanceof UploadBodyError) return reply.code(400).send(failure(request, error.code, error.message));
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === "EEXIST") return reply.code(409).send(failure(request, "file_exists", "同名文件已经存在"));
+          if (code === "ENOSPC" || code === "EDQUOT") return reply.code(507).send(failure(request, "insufficient_storage", "服务器存储空间不足"));
+          return reply.code(400).send(failure(request, "upload_failed", error instanceof Error ? error.message : "无法上传文件"));
+        } finally {
+          activeUploads--;
+        }
+      });
     }
   });
 
